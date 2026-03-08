@@ -10,7 +10,7 @@ public class User
     public string UserPasswordHash { get; set; } = string.Empty;
     public string? UserName { get; set; } 
     public string? UserEmail { get; set; }
-    public string? UserPhoneNumber { get; set; } = "";
+    public string? UserPhoneNumber { get; set; }
     public string? AvatarPath { get; set; }
     public bool IsAdmin { get; set; }
     public bool IsBlocked { get; set; }

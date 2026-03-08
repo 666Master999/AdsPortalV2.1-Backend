@@ -1,5 +1,6 @@
 using AdsPortalV2;
 using AdsPortalV2.Data;
+using AdsPortalV2.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -46,12 +47,16 @@ builder.Services.AddCors(options =>
     });
 });
 
+builder.Services.AddScoped<ImageService>();
+
 var app = builder.Build();
 
 app.UseCors("AllowFrontend");
 
 app.UseAuthentication();
 app.UseAuthorization();
+
+app.UseStaticFiles();
 
 app.MapControllers();
 app.Run();

@@ -76,7 +76,7 @@ public class AuthController(AppDbContext db, IConfiguration config) : Controller
             issuer: config["Jwt:Issuer"],
             audience: config["Jwt:Audience"],
             claims: [
-                new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
+                new Claim("id", user.Id.ToString()), // Changed to "id"
                 new Claim(ClaimTypes.Name, user.UserLogin)
 
             ],
