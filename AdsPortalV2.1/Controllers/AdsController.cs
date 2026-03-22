@@ -88,9 +88,14 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
         }
 
         if (isAdmin)
+        {
             query = db.Ads;
+        }
         else
-            query = db.Ads.Where(ad => !ad.IsDeleted && ad.ModerationStatus == ModerationStatus.Approved);
+        {
+            var userId = userIdClaim != null ? int.Parse(userIdClaim) : (int?)null;
+            query = db.Ads.Where(ad => !ad.IsDeleted && (ad.ModerationStatus == ModerationStatus.Approved || (userId.HasValue && ad.UserId == userId.Value)));
+        }
 
         if (categoryId.HasValue)
             query = query.Where(ad => ad.CategoryId == categoryId.Value);
@@ -128,17 +133,19 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
     [HttpGet("{id}")]
     public async Task<IActionResult> GetById(int id)
     {
+        // Получаем текущего пользователя
         var userIdClaim = User.FindFirst("id")?.Value;
         int? userId = null;
         bool isAdmin = false;
-        if (userIdClaim != null)
+
+        if (!string.IsNullOrEmpty(userIdClaim) && int.TryParse(userIdClaim, out var parsedUserId))
         {
-            userId = int.Parse(userIdClaim);
+            userId = parsedUserId;
             var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == userId);
             isAdmin = user?.IsAdmin == true;
         }
 
-        var ad = await db.Ads
+        var ad = await db.Ads.AsNoTracking()
             .Where(a => a.Id == id)
             .Select(a => new
             {
@@ -153,7 +160,7 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
                 a.CreatedAt,
                 a.UpdatedAt,
                 a.IsDeleted,
-                a.ModerationStatus,
+                ActualModerationStatus = a.ModerationStatus, // всегда получаем реальный статус
                 Category = a.Category == null ? null : new { a.Category.Id, a.Category.Name, a.Category.ParentId },
                 User = a.User == null ? null : new
                 {
@@ -179,16 +186,37 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
             .FirstOrDefaultAsync();
 
         if (ad == null)
-            return NotFound();
+            return NotFound(new { Message = "Объявление не найдено." });
 
-        // Только админ или владелец видят любое объявление, остальные — только одобренные и не удалённые
-        if (!isAdmin && (!userId.HasValue || ad.UserId != userId.Value))
+        // Проверка доступа на основе реальных данных
+        bool isOwner = userId.HasValue && ad.UserId == userId.Value;
+        if (!isAdmin && !isOwner)
         {
-            if (ad.IsDeleted || ad.ModerationStatus != ModerationStatus.Approved)
-                return NotFound();
+            if (ad.IsDeleted || ad.ActualModerationStatus != ModerationStatus.Approved)
+                return new ObjectResult(new { Message = "У вас нет прав доступа к этому объявлению." }) { StatusCode = 403 };
         }
 
-        return Ok(ad);
+        // Формируем ответ, скрывая статус модерации от посторонних
+        var response = new
+        {
+            ad.Id,
+            ad.UserId,
+            ad.CategoryId,
+            ad.Title,
+            ad.Description,
+            ad.Price,
+            ad.City,
+            ad.Type,
+            ad.CreatedAt,
+            ad.UpdatedAt,
+            ad.IsDeleted,
+            ModerationStatus = (isAdmin || isOwner) ? (ModerationStatus?)ad.ActualModerationStatus : null,
+            Category = ad.Category,
+            User = ad.User,
+            Images = ad.Images
+        };
+
+        return Ok(response);
     }
 
     // POST: /ads (multipart/form-data)
