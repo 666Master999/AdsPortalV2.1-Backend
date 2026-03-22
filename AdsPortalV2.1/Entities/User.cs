@@ -21,8 +21,5 @@ public class User
     public List<UserBlock> Blocks { get; set; } = [];
     public List<UserReview> ReviewsReceived { get; set; } = [];
     public List<UserReview> ReviewsWritten { get; set; } = [];
-    public List<Favorite> Favorites { get; set; } = [];
-    public List<ChatMessage> ChatMessages { get; set; } = [];
-    public List<Complaint> Complaints { get; set; } = [];
     public List<AdminLog> AdminLogs { get; set; } = [];
 }

@@ -3,6 +3,8 @@ using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
+#pragma warning disable CA1814 // Prefer jagged arrays over multidimensional
+
 namespace AdsPortalV2.Migrations
 {
     /// <inheritdoc />
@@ -29,19 +31,6 @@ namespace AdsPortalV2.Migrations
                         principalTable: "Categories",
                         principalColumn: "Id",
                         onDelete: ReferentialAction.Restrict);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "Cities",
-                columns: table => new
-                {
-                    Id = table.Column<int>(type: "int", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    Name = table.Column<string>(type: "nvarchar(max)", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_Cities", x => x.Id);
                 });
 
             migrationBuilder.CreateTable(
@@ -94,13 +83,14 @@ namespace AdsPortalV2.Migrations
                     Id = table.Column<int>(type: "int", nullable: false)
                         .Annotation("SqlServer:Identity", "1, 1"),
                     UserId = table.Column<int>(type: "int", nullable: false),
-                    CategoryId = table.Column<int>(type: "int", nullable: false),
-                    CityId = table.Column<int>(type: "int", nullable: false),
+                    CategoryId = table.Column<int>(type: "int", nullable: true),
                     Title = table.Column<string>(type: "nvarchar(max)", nullable: false),
-                    Description = table.Column<string>(type: "nvarchar(max)", nullable: false),
-                    Price = table.Column<decimal>(type: "decimal(18,2)", nullable: false),
-                    IsActive = table.Column<bool>(type: "bit", nullable: false),
-                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false)
+                    Description = table.Column<string>(type: "nvarchar(max)", nullable: true),
+                    Price = table.Column<decimal>(type: "decimal(10,2)", precision: 10, scale: 2, nullable: true),
+                    City = table.Column<string>(type: "nvarchar(max)", nullable: true),
+                    Type = table.Column<string>(type: "nvarchar(max)", nullable: true),
+                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    UpdatedAt = table.Column<DateTime>(type: "datetime2", nullable: false)
                 },
                 constraints: table =>
                 {
@@ -110,13 +100,7 @@ namespace AdsPortalV2.Migrations
                         column: x => x.CategoryId,
                         principalTable: "Categories",
                         principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                    table.ForeignKey(
-                        name: "FK_Ads_Cities_CityId",
-                        column: x => x.CityId,
-                        principalTable: "Cities",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
+                        onDelete: ReferentialAction.Restrict);
                     table.ForeignKey(
                         name: "FK_Ads_Users_UserId",
                         column: x => x.UserId,
@@ -204,7 +188,8 @@ namespace AdsPortalV2.Migrations
                         .Annotation("SqlServer:Identity", "1, 1"),
                     AdId = table.Column<int>(type: "int", nullable: false),
                     FilePath = table.Column<string>(type: "nvarchar(max)", nullable: false),
-                    SortOrder = table.Column<int>(type: "int", nullable: false)
+                    SortOrder = table.Column<int>(type: "int", nullable: false),
+                    IsMain = table.Column<bool>(type: "bit", nullable: false)
                 },
                 constraints: table =>
                 {
@@ -217,109 +202,15 @@ namespace AdsPortalV2.Migrations
                         onDelete: ReferentialAction.Cascade);
                 });
 
-            migrationBuilder.CreateTable(
-                name: "ChatThreads",
-                columns: table => new
+            migrationBuilder.InsertData(
+                table: "Categories",
+                columns: new[] { "Id", "Name", "ParentId" },
+                values: new object[,]
                 {
-                    Id = table.Column<int>(type: "int", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    AdId = table.Column<int>(type: "int", nullable: false),
-                    BuyerId = table.Column<int>(type: "int", nullable: false),
-                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_ChatThreads", x => x.Id);
-                    table.ForeignKey(
-                        name: "FK_ChatThreads_Ads_AdId",
-                        column: x => x.AdId,
-                        principalTable: "Ads",
-                        principalColumn: "Id");
-                    table.ForeignKey(
-                        name: "FK_ChatThreads_Users_BuyerId",
-                        column: x => x.BuyerId,
-                        principalTable: "Users",
-                        principalColumn: "Id");
-                });
-
-            migrationBuilder.CreateTable(
-                name: "Complaints",
-                columns: table => new
-                {
-                    Id = table.Column<int>(type: "int", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    UserId = table.Column<int>(type: "int", nullable: false),
-                    AdId = table.Column<int>(type: "int", nullable: false),
-                    Reason = table.Column<string>(type: "nvarchar(max)", nullable: false),
-                    IsResolved = table.Column<bool>(type: "bit", nullable: false),
-                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_Complaints", x => x.Id);
-                    table.ForeignKey(
-                        name: "FK_Complaints_Ads_AdId",
-                        column: x => x.AdId,
-                        principalTable: "Ads",
-                        principalColumn: "Id");
-                    table.ForeignKey(
-                        name: "FK_Complaints_Users_UserId",
-                        column: x => x.UserId,
-                        principalTable: "Users",
-                        principalColumn: "Id");
-                });
-
-            migrationBuilder.CreateTable(
-                name: "Favorites",
-                columns: table => new
-                {
-                    Id = table.Column<int>(type: "int", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    UserId = table.Column<int>(type: "int", nullable: false),
-                    AdId = table.Column<int>(type: "int", nullable: false),
-                    CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_Favorites", x => x.Id);
-                    table.ForeignKey(
-                        name: "FK_Favorites_Ads_AdId",
-                        column: x => x.AdId,
-                        principalTable: "Ads",
-                        principalColumn: "Id");
-                    table.ForeignKey(
-                        name: "FK_Favorites_Users_UserId",
-                        column: x => x.UserId,
-                        principalTable: "Users",
-                        principalColumn: "Id");
-                });
-
-            migrationBuilder.CreateTable(
-                name: "ChatMessages",
-                columns: table => new
-                {
-                    Id = table.Column<int>(type: "int", nullable: false)
-                        .Annotation("SqlServer:Identity", "1, 1"),
-                    ChatThreadId = table.Column<int>(type: "int", nullable: false),
-                    SenderId = table.Column<int>(type: "int", nullable: false),
-                    Text = table.Column<string>(type: "nvarchar(max)", nullable: false),
-                    SentAt = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    IsRead = table.Column<bool>(type: "bit", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_ChatMessages", x => x.Id);
-                    table.ForeignKey(
-                        name: "FK_ChatMessages_ChatThreads_ChatThreadId",
-                        column: x => x.ChatThreadId,
-                        principalTable: "ChatThreads",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                    table.ForeignKey(
-                        name: "FK_ChatMessages_Users_SenderId",
-                        column: x => x.SenderId,
-                        principalTable: "Users",
-                        principalColumn: "Id");
+                    { 1, "Электроника", null },
+                    { 2, "Бытовая техника", null },
+                    { 3, "Книги", null },
+                    { 4, "Одежда", null }
                 });
 
             migrationBuilder.CreateIndex(
@@ -338,11 +229,6 @@ namespace AdsPortalV2.Migrations
                 column: "CategoryId");
 
             migrationBuilder.CreateIndex(
-                name: "IX_Ads_CityId",
-                table: "Ads",
-                column: "CityId");
-
-            migrationBuilder.CreateIndex(
                 name: "IX_Ads_UserId",
                 table: "Ads",
                 column: "UserId");
@@ -351,46 +237,6 @@ namespace AdsPortalV2.Migrations
                 name: "IX_Categories_ParentId",
                 table: "Categories",
                 column: "ParentId");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_ChatMessages_ChatThreadId",
-                table: "ChatMessages",
-                column: "ChatThreadId");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_ChatMessages_SenderId",
-                table: "ChatMessages",
-                column: "SenderId");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_ChatThreads_AdId",
-                table: "ChatThreads",
-                column: "AdId");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_ChatThreads_BuyerId",
-                table: "ChatThreads",
-                column: "BuyerId");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_Complaints_AdId",
-                table: "Complaints",
-                column: "AdId");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_Complaints_UserId",
-                table: "Complaints",
-                column: "UserId");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_Favorites_AdId",
-                table: "Favorites",
-                column: "AdId");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_Favorites_UserId",
-                table: "Favorites",
-                column: "UserId");
 
             migrationBuilder.CreateIndex(
                 name: "IX_UserBlocks_UserId",
@@ -423,15 +269,6 @@ namespace AdsPortalV2.Migrations
                 name: "AdminLogs");
 
             migrationBuilder.DropTable(
-                name: "ChatMessages");
-
-            migrationBuilder.DropTable(
-                name: "Complaints");
-
-            migrationBuilder.DropTable(
-                name: "Favorites");
-
-            migrationBuilder.DropTable(
                 name: "UserBlocks");
 
             migrationBuilder.DropTable(
@@ -441,16 +278,10 @@ namespace AdsPortalV2.Migrations
                 name: "UserSessions");
 
             migrationBuilder.DropTable(
-                name: "ChatThreads");
-
-            migrationBuilder.DropTable(
                 name: "Ads");
 
             migrationBuilder.DropTable(
                 name: "Categories");
-
-            migrationBuilder.DropTable(
-                name: "Cities");
 
             migrationBuilder.DropTable(
                 name: "Users");

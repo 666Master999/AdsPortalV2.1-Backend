@@ -12,7 +12,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace AdsPortalV2.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20260228111927_InitialCreate")]
+    [Migration("20260311202310_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -20,7 +20,7 @@ namespace AdsPortalV2.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.0-preview.5.25277.114")
+                .HasAnnotation("ProductVersion", "10.0.3")
                 .HasAnnotation("Relational:MaxIdentifierLength", 128);
 
             SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
@@ -33,28 +33,31 @@ namespace AdsPortalV2.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
 
-                    b.Property<int>("CategoryId")
+                    b.Property<int?>("CategoryId")
                         .HasColumnType("int");
 
-                    b.Property<int>("CityId")
-                        .HasColumnType("int");
+                    b.Property<string>("City")
+                        .HasColumnType("nvarchar(max)");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime2");
 
                     b.Property<string>("Description")
-                        .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
-                    b.Property<bool>("IsActive")
-                        .HasColumnType("bit");
-
-                    b.Property<decimal>("Price")
-                        .HasColumnType("decimal(18,2)");
+                    b.Property<decimal?>("Price")
+                        .HasPrecision(10, 2)
+                        .HasColumnType("decimal(10,2)");
 
                     b.Property<string>("Title")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Type")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
 
                     b.Property<int>("UserId")
                         .HasColumnType("int");
@@ -62,8 +65,6 @@ namespace AdsPortalV2.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("CategoryId");
-
-                    b.HasIndex("CityId");
 
                     b.HasIndex("UserId");
 
@@ -84,6 +85,9 @@ namespace AdsPortalV2.Migrations
                     b.Property<string>("FilePath")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("IsMain")
+                        .HasColumnType("bit");
 
                     b.Property<int>("SortOrder")
                         .HasColumnType("int");
@@ -143,141 +147,28 @@ namespace AdsPortalV2.Migrations
                     b.HasIndex("ParentId");
 
                     b.ToTable("Categories");
-                });
 
-            modelBuilder.Entity("AdsPortalV2.Entities.ChatMessage", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("int");
-
-                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
-
-                    b.Property<int>("ChatThreadId")
-                        .HasColumnType("int");
-
-                    b.Property<bool>("IsRead")
-                        .HasColumnType("bit");
-
-                    b.Property<int>("SenderId")
-                        .HasColumnType("int");
-
-                    b.Property<DateTime>("SentAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<string>("Text")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ChatThreadId");
-
-                    b.HasIndex("SenderId");
-
-                    b.ToTable("ChatMessages");
-                });
-
-            modelBuilder.Entity("AdsPortalV2.Entities.ChatThread", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("int");
-
-                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
-
-                    b.Property<int>("AdId")
-                        .HasColumnType("int");
-
-                    b.Property<int>("BuyerId")
-                        .HasColumnType("int");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("datetime2");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("AdId");
-
-                    b.HasIndex("BuyerId");
-
-                    b.ToTable("ChatThreads");
-                });
-
-            modelBuilder.Entity("AdsPortalV2.Entities.City", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("int");
-
-                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.HasKey("Id");
-
-                    b.ToTable("Cities");
-                });
-
-            modelBuilder.Entity("AdsPortalV2.Entities.Complaint", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("int");
-
-                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
-
-                    b.Property<int>("AdId")
-                        .HasColumnType("int");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<bool>("IsResolved")
-                        .HasColumnType("bit");
-
-                    b.Property<string>("Reason")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<int>("UserId")
-                        .HasColumnType("int");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("AdId");
-
-                    b.HasIndex("UserId");
-
-                    b.ToTable("Complaints");
-                });
-
-            modelBuilder.Entity("AdsPortalV2.Entities.Favorite", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("int");
-
-                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
-
-                    b.Property<int>("AdId")
-                        .HasColumnType("int");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<int>("UserId")
-                        .HasColumnType("int");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("AdId");
-
-                    b.HasIndex("UserId");
-
-                    b.ToTable("Favorites");
+                    b.HasData(
+                        new
+                        {
+                            Id = 1,
+                            Name = "Электроника"
+                        },
+                        new
+                        {
+                            Id = 2,
+                            Name = "Бытовая техника"
+                        },
+                        new
+                        {
+                            Id = 3,
+                            Name = "Книги"
+                        },
+                        new
+                        {
+                            Id = 4,
+                            Name = "Одежда"
+                        });
                 });
 
             modelBuilder.Entity("AdsPortalV2.Entities.User", b =>
@@ -415,14 +306,7 @@ namespace AdsPortalV2.Migrations
                     b.HasOne("AdsPortalV2.Entities.Category", "Category")
                         .WithMany("Ads")
                         .HasForeignKey("CategoryId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("AdsPortalV2.Entities.City", "City")
-                        .WithMany("Ads")
-                        .HasForeignKey("CityId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
+                        .OnDelete(DeleteBehavior.Restrict);
 
                     b.HasOne("AdsPortalV2.Entities.User", "User")
                         .WithMany("Ads")
@@ -431,8 +315,6 @@ namespace AdsPortalV2.Migrations
                         .IsRequired();
 
                     b.Navigation("Category");
-
-                    b.Navigation("City");
 
                     b.Navigation("User");
                 });
@@ -467,82 +349,6 @@ namespace AdsPortalV2.Migrations
                         .OnDelete(DeleteBehavior.Restrict);
 
                     b.Navigation("Parent");
-                });
-
-            modelBuilder.Entity("AdsPortalV2.Entities.ChatMessage", b =>
-                {
-                    b.HasOne("AdsPortalV2.Entities.ChatThread", "ChatThread")
-                        .WithMany("Messages")
-                        .HasForeignKey("ChatThreadId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("AdsPortalV2.Entities.User", "Sender")
-                        .WithMany("ChatMessages")
-                        .HasForeignKey("SenderId")
-                        .OnDelete(DeleteBehavior.NoAction)
-                        .IsRequired();
-
-                    b.Navigation("ChatThread");
-
-                    b.Navigation("Sender");
-                });
-
-            modelBuilder.Entity("AdsPortalV2.Entities.ChatThread", b =>
-                {
-                    b.HasOne("AdsPortalV2.Entities.Ad", "Ad")
-                        .WithMany("ChatThreads")
-                        .HasForeignKey("AdId")
-                        .OnDelete(DeleteBehavior.NoAction)
-                        .IsRequired();
-
-                    b.HasOne("AdsPortalV2.Entities.User", "Buyer")
-                        .WithMany()
-                        .HasForeignKey("BuyerId")
-                        .OnDelete(DeleteBehavior.NoAction)
-                        .IsRequired();
-
-                    b.Navigation("Ad");
-
-                    b.Navigation("Buyer");
-                });
-
-            modelBuilder.Entity("AdsPortalV2.Entities.Complaint", b =>
-                {
-                    b.HasOne("AdsPortalV2.Entities.Ad", "Ad")
-                        .WithMany("Complaints")
-                        .HasForeignKey("AdId")
-                        .OnDelete(DeleteBehavior.NoAction)
-                        .IsRequired();
-
-                    b.HasOne("AdsPortalV2.Entities.User", "User")
-                        .WithMany("Complaints")
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.NoAction)
-                        .IsRequired();
-
-                    b.Navigation("Ad");
-
-                    b.Navigation("User");
-                });
-
-            modelBuilder.Entity("AdsPortalV2.Entities.Favorite", b =>
-                {
-                    b.HasOne("AdsPortalV2.Entities.Ad", "Ad")
-                        .WithMany("Favorites")
-                        .HasForeignKey("AdId")
-                        .OnDelete(DeleteBehavior.NoAction)
-                        .IsRequired();
-
-                    b.HasOne("AdsPortalV2.Entities.User", "User")
-                        .WithMany("Favorites")
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.NoAction)
-                        .IsRequired();
-
-                    b.Navigation("Ad");
-
-                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("AdsPortalV2.Entities.UserBlock", b =>
@@ -588,12 +394,6 @@ namespace AdsPortalV2.Migrations
 
             modelBuilder.Entity("AdsPortalV2.Entities.Ad", b =>
                 {
-                    b.Navigation("ChatThreads");
-
-                    b.Navigation("Complaints");
-
-                    b.Navigation("Favorites");
-
                     b.Navigation("Images");
                 });
 
@@ -604,16 +404,6 @@ namespace AdsPortalV2.Migrations
                     b.Navigation("Children");
                 });
 
-            modelBuilder.Entity("AdsPortalV2.Entities.ChatThread", b =>
-                {
-                    b.Navigation("Messages");
-                });
-
-            modelBuilder.Entity("AdsPortalV2.Entities.City", b =>
-                {
-                    b.Navigation("Ads");
-                });
-
             modelBuilder.Entity("AdsPortalV2.Entities.User", b =>
                 {
                     b.Navigation("AdminLogs");
@@ -621,12 +411,6 @@ namespace AdsPortalV2.Migrations
                     b.Navigation("Ads");
 
                     b.Navigation("Blocks");
-
-                    b.Navigation("ChatMessages");
-
-                    b.Navigation("Complaints");
-
-                    b.Navigation("Favorites");
 
                     b.Navigation("ReviewsReceived");
 

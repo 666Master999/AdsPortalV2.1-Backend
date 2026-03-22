@@ -11,9 +11,23 @@ namespace AdsPortalV2.Services
 {
     public class ImageService
     {
+        private static readonly char[] _chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".ToCharArray();
+
+        public string GenerateShortFileName(string ext)
+        {
+            var rnd = new Random();
+            var arr = new char[8];
+            for (int i = 0; i < 8; i++) arr[i] = _chars[rnd.Next(_chars.Length)];
+            return new string(arr) + ext;
+        }
+
         public async Task<string> SaveCompressedImageAsync(Stream inputStream, string uploadsFolder, string fileName,
             int targetKb = 50, int minQuality = 1, int maxQuality = 100)
         {
+            if (inputStream == null) throw new ArgumentNullException(nameof(inputStream));
+            if (string.IsNullOrWhiteSpace(uploadsFolder)) throw new ArgumentException("Uploads folder path is required.", nameof(uploadsFolder));
+            if (string.IsNullOrWhiteSpace(fileName)) throw new ArgumentException("File name is required.", nameof(fileName));
+
             Directory.CreateDirectory(uploadsFolder);
             var filePath = Path.Combine(uploadsFolder, fileName);
             int targetBytes = targetKb * 1024;

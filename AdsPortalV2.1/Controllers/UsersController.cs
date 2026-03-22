@@ -124,22 +124,9 @@ namespace AdsPortalV2.Controllers
         {
             var ads = await _db.Ads
                 .AsNoTracking()
-                .Where(a => a.UserId == id && a.IsActive)
                 .ToListAsync();
 
             return Ok(ads);
-        }
-
-        [HttpGet("{id:int}/favorites")]
-        public async Task<IActionResult> GetFavorites(int id)
-        {
-            var favorites = await _db.Favorites
-                .AsNoTracking()
-                .Where(f => f.UserId == id)
-                .Include(f => f.Ad)
-                .ToListAsync();
-
-            return Ok(favorites);
         }
 
         [HttpGet("userprofile/{id:int}")]
@@ -160,8 +147,7 @@ namespace AdsPortalV2.Controllers
                     UserPhoneNumber = currentUserId == id ? u.UserPhoneNumber : null,
                     IsAdmin = currentUserId == id ? u.IsAdmin : (bool?)null,
                     IsBlocked = currentUserId == id ? u.IsBlocked : (bool?)null,
-                    Ads = currentUserId == id ? u.Ads : null,
-                    Favorites = currentUserId == id ? u.Favorites : null
+                    Ads = currentUserId == id ? u.Ads : null
                 })
                 .FirstOrDefaultAsync();
 
