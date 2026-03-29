@@ -42,7 +42,13 @@ namespace AdsPortalV2.Migrations
                     b.Property<string>("Description")
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<int>("FavoritesCount")
+                        .HasColumnType("int");
+
                     b.Property<bool>("IsDeleted")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("IsNegotiable")
                         .HasColumnType("bit");
 
                     b.Property<int>("ModerationStatus")
@@ -65,6 +71,9 @@ namespace AdsPortalV2.Migrations
                         .HasColumnType("datetime2");
 
                     b.Property<int>("UserId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("ViewsCount")
                         .HasColumnType("int");
 
                     b.HasKey("Id");
@@ -176,6 +185,118 @@ namespace AdsPortalV2.Migrations
                         });
                 });
 
+            modelBuilder.Entity("AdsPortalV2.Entities.Conversation", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("AdId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("BuyerId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("DialogFolderPath")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("HasUnreadForBuyer")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("HasUnreadForSeller")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("IsArchivedForBuyer")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("IsArchivedForSeller")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("IsClosed")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("IsMutedForBuyer")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("IsMutedForSeller")
+                        .HasColumnType("bit");
+
+                    b.Property<int>("LastClusterId")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("LastMessageAuthorId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("LastMessageText")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("LastMessageTimestamp")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int?>("LastMessageType")
+                        .HasColumnType("int");
+
+                    b.Property<int>("SellerId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("TotalMessagesCount")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AdId");
+
+                    b.HasIndex("BuyerId");
+
+                    b.HasIndex("LastMessageTimestamp");
+
+                    b.HasIndex("SellerId", "BuyerId", "AdId")
+                        .IsUnique();
+
+                    b.ToTable("Conversations");
+                });
+
+            modelBuilder.Entity("AdsPortalV2.Entities.Notification", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<int?>("AdId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("IsRead")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Message")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("Type")
+                        .HasColumnType("int");
+
+                    b.Property<int>("UserId")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AdId");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("Notifications");
+                });
+
             modelBuilder.Entity("AdsPortalV2.Entities.User", b =>
                 {
                     b.Property<int>("Id")
@@ -195,6 +316,9 @@ namespace AdsPortalV2.Migrations
 
                     b.Property<bool>("IsBlocked")
                         .HasColumnType("bit");
+
+                    b.Property<DateTime>("LastActivityAt")
+                        .HasColumnType("datetime2");
 
                     b.Property<string>("UserEmail")
                         .HasColumnType("nvarchar(max)");
@@ -244,6 +368,32 @@ namespace AdsPortalV2.Migrations
                     b.HasIndex("UserId");
 
                     b.ToTable("UserBlocks");
+                });
+
+            modelBuilder.Entity("AdsPortalV2.Entities.UserFavoriteAd", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("AdId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("AddedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("UserId")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AdId");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("UserFavoriteAds");
                 });
 
             modelBuilder.Entity("AdsPortalV2.Entities.UserReview", b =>
@@ -316,7 +466,7 @@ namespace AdsPortalV2.Migrations
                     b.HasOne("AdsPortalV2.Entities.User", "User")
                         .WithMany("Ads")
                         .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.NoAction)
                         .IsRequired();
 
                     b.Navigation("Category");
@@ -350,10 +500,54 @@ namespace AdsPortalV2.Migrations
                 {
                     b.HasOne("AdsPortalV2.Entities.Category", "Parent")
                         .WithMany("Children")
-                        .HasForeignKey("ParentId")
-                        .OnDelete(DeleteBehavior.Restrict);
+                        .HasForeignKey("ParentId");
 
                     b.Navigation("Parent");
+                });
+
+            modelBuilder.Entity("AdsPortalV2.Entities.Conversation", b =>
+                {
+                    b.HasOne("AdsPortalV2.Entities.Ad", "Ad")
+                        .WithMany("Conversations")
+                        .HasForeignKey("AdId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+
+                    b.HasOne("AdsPortalV2.Entities.User", "Buyer")
+                        .WithMany("ConversationsAsBuyer")
+                        .HasForeignKey("BuyerId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+
+                    b.HasOne("AdsPortalV2.Entities.User", "Seller")
+                        .WithMany("ConversationsAsSeller")
+                        .HasForeignKey("SellerId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+
+                    b.Navigation("Ad");
+
+                    b.Navigation("Buyer");
+
+                    b.Navigation("Seller");
+                });
+
+            modelBuilder.Entity("AdsPortalV2.Entities.Notification", b =>
+                {
+                    b.HasOne("AdsPortalV2.Entities.Ad", "Ad")
+                        .WithMany()
+                        .HasForeignKey("AdId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("AdsPortalV2.Entities.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Ad");
+
+                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("AdsPortalV2.Entities.UserBlock", b =>
@@ -363,6 +557,25 @@ namespace AdsPortalV2.Migrations
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("AdsPortalV2.Entities.UserFavoriteAd", b =>
+                {
+                    b.HasOne("AdsPortalV2.Entities.Ad", "Ad")
+                        .WithMany()
+                        .HasForeignKey("AdId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+
+                    b.HasOne("AdsPortalV2.Entities.User", "User")
+                        .WithMany("Favorites")
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+
+                    b.Navigation("Ad");
 
                     b.Navigation("User");
                 });
@@ -399,6 +612,8 @@ namespace AdsPortalV2.Migrations
 
             modelBuilder.Entity("AdsPortalV2.Entities.Ad", b =>
                 {
+                    b.Navigation("Conversations");
+
                     b.Navigation("Images");
                 });
 
@@ -416,6 +631,12 @@ namespace AdsPortalV2.Migrations
                     b.Navigation("Ads");
 
                     b.Navigation("Blocks");
+
+                    b.Navigation("ConversationsAsBuyer");
+
+                    b.Navigation("ConversationsAsSeller");
+
+                    b.Navigation("Favorites");
 
                     b.Navigation("ReviewsReceived");
 

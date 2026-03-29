@@ -76,9 +76,9 @@ public class AuthController(AppDbContext db, IConfiguration config) : Controller
             issuer: config["Jwt:Issuer"],
             audience: config["Jwt:Audience"],
             claims: [
-                new Claim("id", user.Id.ToString()), // Changed to "id"
-                new Claim(ClaimTypes.Name, user.UserLogin)
-
+                new Claim("id", user.Id.ToString()),
+                new Claim(ClaimTypes.Name, user.UserLogin),
+                new Claim("isAdmin", user.IsAdmin.ToString())
             ],
             expires: DateTime.UtcNow.AddDays(7),
             signingCredentials: credentials);

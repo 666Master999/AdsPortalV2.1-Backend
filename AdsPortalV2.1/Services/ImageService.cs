@@ -13,20 +13,22 @@ namespace AdsPortalV2.Services
     {
         private static readonly char[] _chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".ToCharArray();
 
-        public string GenerateShortFileName(string ext)
+        public string GenerateShortFileName(string? ext)
         {
-            var rnd = new Random();
-            var arr = new char[8];
-            for (int i = 0; i < 8; i++) arr[i] = _chars[rnd.Next(_chars.Length)];
-            return new string(arr) + ext;
+            if (string.IsNullOrEmpty(ext))
+            {
+                return Guid.NewGuid().ToString("N");
+            }
+
+            return Guid.NewGuid().ToString("N") + ext;
         }
 
         public async Task<string> SaveCompressedImageAsync(Stream inputStream, string uploadsFolder, string fileName,
             int targetKb = 50, int minQuality = 1, int maxQuality = 100)
         {
             if (inputStream == null) throw new ArgumentNullException(nameof(inputStream));
-            if (string.IsNullOrWhiteSpace(uploadsFolder)) throw new ArgumentException("Uploads folder path is required.", nameof(uploadsFolder));
-            if (string.IsNullOrWhiteSpace(fileName)) throw new ArgumentException("File name is required.", nameof(fileName));
+            if (string.IsNullOrEmpty(uploadsFolder)) throw new ArgumentException("Uploads folder path is required.", nameof(uploadsFolder));
+            if (string.IsNullOrEmpty(fileName)) throw new ArgumentException("File name is required.", nameof(fileName));
 
             Directory.CreateDirectory(uploadsFolder);
             var filePath = Path.Combine(uploadsFolder, fileName);
@@ -43,11 +45,11 @@ namespace AdsPortalV2.Services
                 return ms.ToArray();
             }
 
-            async Task<byte[]> FindByQualityAsync(Image<Rgba32> img)
+            async Task<byte[]?> FindByQualityAsync(Image<Rgba32> img)
             {
                 int lo = minQuality;
                 int hi = maxQuality;
-                byte[] bestUnder = null;
+                byte[]? bestUnder = null;
 
                 var hiBytes = await EncodeImageAsync(img, hi);
                 if (hiBytes.Length <= targetBytes) return hiBytes;

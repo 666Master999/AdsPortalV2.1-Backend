@@ -1,9 +1,12 @@
 using AdsPortalV2.Data;
 using AdsPortalV2.Entities;
+using AdsPortalV2.Hubs;
 using AdsPortalV2.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using System.Reflection;
 using System.Text.Json;
 
@@ -11,28 +14,42 @@ namespace AdsPortalV2.Controllers;
 
 [ApiController]
 [Route("ads")]
-public class AdsController(AppDbContext db, ImageService _imageService) : ControllerBase
+public class AdsController(AppDbContext db, ImageService _imageService, IMemoryCache _cache, IHubContext<NotificationHub> _hub) : ControllerBase
 {
     // PATCH: /ads/{id}/moderation
     [Authorize]
     [HttpPatch("{id}/moderation")]
     public async Task<IActionResult> PatchModerationStatus(int id, [FromBody] ModerationStatus status)
     {
-        var userIdClaim = User.FindFirst("id")?.Value;
-        if (userIdClaim == null)
-            return Unauthorized();
-
-        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == int.Parse(userIdClaim));
-        if (user == null || !user.IsAdmin)
+        if (!User.TryGetUserId(out _) || !User.IsAdmin())
             return Forbid();
 
         var ad = await db.Ads.FirstOrDefaultAsync(a => a.Id == id);
         if (ad == null)
             return NotFound();
 
+        var previousStatus = ad.ModerationStatus;
         ad.ModerationStatus = status;
         ad.UpdatedAt = DateTime.UtcNow;
+
+        if (status != previousStatus && status is ModerationStatus.Approved or ModerationStatus.Rejected)
+        {
+            db.Notifications.Add(new Notification
+            {
+                UserId = ad.UserId,
+                Type = status == ModerationStatus.Approved ? NotificationType.AdApproved : NotificationType.AdRejected,
+                AdId = ad.Id
+            });
+        }
+
         await db.SaveChangesAsync();
+
+        if (status != previousStatus && status is ModerationStatus.Approved or ModerationStatus.Rejected)
+        {
+            var type = status == ModerationStatus.Approved ? NotificationType.AdApproved : NotificationType.AdRejected;
+            await _hub.Clients.Group($"user:{ad.UserId}").SendAsync("notification", new { AdId = ad.Id, Type = type });
+        }
+
         return Ok(new { ad.Id, ad.ModerationStatus });
     }
     // GET: /ads/moderation
@@ -40,12 +57,7 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
     [HttpGet("moderation")]
     public async Task<IActionResult> GetModerationList()
     {
-        var userIdClaim = User.FindFirst("id")?.Value;
-        if (userIdClaim == null)
-            return Unauthorized();
-
-        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == int.Parse(userIdClaim));
-        if (user == null || !user.IsAdmin)
+        if (!User.TryGetUserId(out _) || !User.IsAdmin())
             return Forbid();
 
         var result = await db.Ads
@@ -76,15 +88,17 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
     }
     // GET: /ads?sortBy=title&descending=false
     [HttpGet]
-    public async Task<IActionResult> GetAll([FromQuery] string? sortBy, [FromQuery] bool descending = false, [FromQuery] int? categoryId = null)
+    public async Task<IActionResult> GetAll([FromQuery] string? sortBy, [FromQuery] bool descending = false, [FromQuery] int? categoryId = null, [FromQuery] List<int>? ids = null)
     {
         IQueryable<Ad> query;
         var userIdClaim = User.FindFirst("id")?.Value;
         bool isAdmin = false;
-        if (userIdClaim != null)
+        int? userId = null;
+
+        if (userIdClaim != null && int.TryParse(userIdClaim, out var parsedUserId))
         {
-            var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == int.Parse(userIdClaim));
-            isAdmin = user?.IsAdmin == true;
+            userId = parsedUserId;
+            isAdmin = User.IsAdmin();
         }
 
         if (isAdmin)
@@ -93,12 +107,14 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
         }
         else
         {
-            var userId = userIdClaim != null ? int.Parse(userIdClaim) : (int?)null;
             query = db.Ads.Where(ad => !ad.IsDeleted && (ad.ModerationStatus == ModerationStatus.Approved || (userId.HasValue && ad.UserId == userId.Value)));
         }
 
         if (categoryId.HasValue)
             query = query.Where(ad => ad.CategoryId == categoryId.Value);
+
+        if (ids?.Count > 0)
+            query = query.Where(ad => ids.Contains(ad.Id));
 
         query = sortBy?.ToLower() switch
         {
@@ -114,16 +130,21 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
             ad.Title,
             ad.Description,
             ad.Price,
+            ad.IsNegotiable,
             ad.CategoryId,
             ad.City,
             ad.Type,
             ad.CreatedAt,
             ad.UpdatedAt,
             ad.UserId,
+            ad.ViewsCount,
+            ad.FavoritesCount,
             MainImageUrl = ad.Images
                 .Where(img => img.IsMain)
                 .Select(img => img.FilePath)
-                .FirstOrDefault()
+                .FirstOrDefault(),
+            IsFavorite = userId.HasValue && db.UserFavoriteAds.Any(fav => fav.UserId == userId.Value && fav.AdId == ad.Id),
+            ModerationStatus = isAdmin || (userId.HasValue && ad.UserId == userId.Value) ? (ModerationStatus?)ad.ModerationStatus : null
         }).ToListAsync();
 
         return Ok(result);
@@ -141,8 +162,7 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
         if (!string.IsNullOrEmpty(userIdClaim) && int.TryParse(userIdClaim, out var parsedUserId))
         {
             userId = parsedUserId;
-            var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == userId);
-            isAdmin = user?.IsAdmin == true;
+            isAdmin = User.IsAdmin();
         }
 
         var ad = await db.Ads.AsNoTracking()
@@ -155,12 +175,13 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
                 a.Title,
                 a.Description,
                 a.Price,
+                a.IsNegotiable, // Добавляем флаг договорной цены в ответ
                 a.City,
                 a.Type,
                 a.CreatedAt,
                 a.UpdatedAt,
                 a.IsDeleted,
-                ActualModerationStatus = a.ModerationStatus, // всегда получаем реальный статус
+                ActualModerationStatus = a.ModerationStatus,
                 Category = a.Category == null ? null : new { a.Category.Id, a.Category.Name, a.Category.ParentId },
                 User = a.User == null ? null : new
                 {
@@ -172,7 +193,8 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
                     a.User.AvatarPath,
                     a.User.IsAdmin,
                     a.User.IsBlocked,
-                    a.User.CreatedAt
+                    a.User.CreatedAt,
+                    a.User.LastActivityAt
                 },
                 Images = a.Images.OrderBy(img => img.SortOrder).Select(img => new
                 {
@@ -196,6 +218,27 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
                 return new ObjectResult(new { Message = "У вас нет прав доступа к этому объявлению." }) { StatusCode = 403 };
         }
 
+        // Уникальный просмотр: считываем только если не сам владелец
+        if (!isOwner && userId.HasValue)
+        {
+            var cacheKey = $"view:{id}:{userId}";
+            if (!_cache.TryGetValue(cacheKey, out _))
+            {
+                _cache.Set(cacheKey, true, TimeSpan.FromHours(24));
+                await db.Ads.Where(a => a.Id == id).ExecuteUpdateAsync(s => s.SetProperty(a => a.ViewsCount, a => a.ViewsCount + 1));
+            }
+        }
+
+        // Получение ID избранных объявлений текущего пользователя
+        List<int>? currentUserFavorites = null;
+        if (userId.HasValue)
+        {
+            currentUserFavorites = await db.UserFavoriteAds
+                .Where(fav => fav.UserId == userId.Value)
+                .Select(fav => fav.AdId)
+                .ToListAsync();
+        }
+
         // Формируем ответ, скрывая статус модерации от посторонних
         var response = new
         {
@@ -205,6 +248,7 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
             ad.Title,
             ad.Description,
             ad.Price,
+            ad.IsNegotiable, // Добавляем флаг договорной цены
             ad.City,
             ad.Type,
             ad.CreatedAt,
@@ -213,7 +257,8 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
             ModerationStatus = (isAdmin || isOwner) ? (ModerationStatus?)ad.ActualModerationStatus : null,
             Category = ad.Category,
             User = ad.User,
-            Images = ad.Images
+            Images = ad.Images,
+            CurrentUserFavorites = currentUserFavorites
         };
 
         return Ok(response);
@@ -297,7 +342,11 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
             return NotFound();
 
         var userIdClaim = User.FindFirst("id")?.Value;
-        if (userIdClaim == null || ad.UserId != int.Parse(userIdClaim))
+        if (userIdClaim == null)
+            return Unauthorized();
+
+        // Проверка прав доступа
+        if (!User.IsAdmin() && ad.UserId != int.Parse(userIdClaim))
             return Forbid();
 
         var updated = new List<string>();
@@ -319,14 +368,10 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
                 }
 
                 var images = JsonSerializer.Deserialize<List<JsonElement>>(imagesElem.GetRawText()) ?? new();
-                // Список для отслеживания обработанных ID (если нужно)
-                var processedImageIds = new HashSet<int>();
-
                 foreach (var imageElem in images)
                 {
                     try
                     {
-                        // Удаление
                         if (imageElem.TryGetProperty("delete", out var deleteProp) && deleteProp.GetBoolean())
                         {
                             if (imageElem.TryGetProperty("id", out var idProp) && idProp.TryGetInt32(out var idToDelete))
@@ -334,9 +379,12 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
                                 var imageToDelete = ad.Images.FirstOrDefault(img => img.Id == idToDelete);
                                 if (imageToDelete != null)
                                 {
-                                    var fullPath = Path.Combine("wwwroot", imageToDelete.FilePath);
-                                    if (System.IO.File.Exists(fullPath))
+                                    var filePath = imageToDelete.FilePath ?? string.Empty;
+                                    var fullPath = Path.Combine("wwwroot", filePath);
+                                    if (!string.IsNullOrEmpty(filePath) && System.IO.File.Exists(fullPath))
+                                    {
                                         System.IO.File.Delete(fullPath);
+                                    }
 
                                     db.AdImages.Remove(imageToDelete);
                                     updated.Add($"Image {idToDelete} deleted");
@@ -347,7 +395,6 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
                                 }
                             }
                         }
-                        // Обновление существующего
                         else if (imageElem.TryGetProperty("id", out var idProp) && idProp.TryGetInt32(out var idToUpdate))
                         {
                             var existingImage = ad.Images.FirstOrDefault(img => img.Id == idToUpdate);
@@ -359,7 +406,6 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
                                 if (imageElem.TryGetProperty("isMain", out var mainProp))
                                     existingImage.IsMain = mainProp.ValueKind == JsonValueKind.True;
 
-                                processedImageIds.Add(idToUpdate);
                                 updated.Add($"Image {idToUpdate} updated");
                             }
                             else
@@ -367,7 +413,6 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
                                 skipped.Add($"Image {idToUpdate} not found");
                             }
                         }
-                        // Добавление нового
                         else if (imageElem.TryGetProperty("filePath", out var filePathProp))
                         {
                             var filePath = filePathProp.GetString();
@@ -377,7 +422,6 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
                                 continue;
                             }
 
-                            // Проверка безопасности пути
                             if (filePath.Contains("..") || Path.IsPathRooted(filePath))
                             {
                                 skipped.Add($"Invalid filePath: {filePath}");
@@ -390,7 +434,6 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
                                 skipped.Add($"File not found: {filePath}");
                                 continue;
                             }
-
 
                             var isMain = imageElem.TryGetProperty("isMain", out var mainProp) && mainProp.ValueKind == JsonValueKind.True;
                             var newImage = new AdImage
@@ -415,17 +458,6 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
                     }
                 }
 
-                var allImages = ad.Images.ToList();
-
-                var existingImageIds = ad.Images.Select(i => i.Id).ToHashSet();
-                var newImages = db.AdImages.Local.Where(i => i.AdId == ad.Id && i.Id == 0).ToList(); // новые, ещё не сохранённые
-                var allImagesForSort = ad.Images.Concat(newImages).OrderBy(i => i.SortOrder).ToList();
-
-                for (int i = 0; i < allImagesForSort.Count; i++)
-                {
-                    allImagesForSort[i].SortOrder = i;
-                }
-
                 continue;
             }
 
@@ -448,11 +480,27 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
                 object value;
                 if (kv.Value is JsonElement jsonElem)
                 {
-                    value = JsonSerializer.Deserialize(jsonElem.GetRawText(), prop.PropertyType);
+                    if (prop.PropertyType == typeof(decimal?) && jsonElem.ValueKind == JsonValueKind.String)
+                    {
+                        if (!decimal.TryParse(jsonElem.GetString(), out var parsedDecimal))
+                        {
+                            skipped.Add($"Invalid value for {key}: {jsonElem.GetString()}");
+                            continue;
+                        }
+                        value = parsedDecimal;
+                    }
+                    else
+                    {
+                        value = JsonSerializer.Deserialize(jsonElem.GetRawText(), prop.PropertyType);
+                        if (value == null)
+                        {
+                            skipped.Add($"Failed to deserialize property {key}.");
+                            continue;
+                        }
+                    }
                 }
                 else
                 {
-                    // fallback для простых типов (int, string и т.д.) если вдруг не JsonElement
                     value = Convert.ChangeType(kv.Value, prop.PropertyType);
                 }
 
@@ -461,18 +509,11 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
             }
             catch (Exception ex)
             {
-                errors.Add($"Error processing property {key}: {ex.Message}");
+                skipped.Add($"Error processing property {key}: {ex.Message}");
             }
         }
 
         ad.UpdatedAt = DateTime.UtcNow;
-
-        // Если есть ошибки, откатываем транзакцию и возвращаем BadRequest
-        if (errors.Any())
-        {
-            await transaction.RollbackAsync();
-            return BadRequest(new { success = false, errors, skipped, updated });
-        }
 
         await db.SaveChangesAsync();
         await transaction.CommitAsync();
@@ -530,7 +571,15 @@ public class AdsController(AppDbContext db, ImageService _imageService) : Contro
             return NotFound();
 
         var userIdClaim = User.FindFirst("id")?.Value;
-        if (userIdClaim == null || ad.UserId != int.Parse(userIdClaim))
+        if (userIdClaim == null)
+            return Unauthorized();
+
+        var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == int.Parse(userIdClaim));
+        if (user == null)
+            return Unauthorized();
+
+        // Проверка прав доступа
+        if (!user.IsAdmin && ad.UserId != int.Parse(userIdClaim))
             return Forbid();
 
         if (files == null || files.Count == 0)

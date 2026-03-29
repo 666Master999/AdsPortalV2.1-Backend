@@ -3,13 +3,16 @@
     // CorsExtensions.cs
     public static class CORS_Extensions
     {
-        public static IServiceCollection AddCustomCors(this IServiceCollection services)
+        public static IServiceCollection AddCustomCors(this IServiceCollection services, IConfiguration configuration)
         {
             services.AddCors(options =>
             {
                 options.AddPolicy("AllowFrontend", policy =>
                 {
-                    policy.WithOrigins("https://localhost:5173") // укажи свой URL
+                    var origins = configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
+                                  ?? new[] { "http://localhost:5173", "https://localhost:5173" };
+
+                    policy.WithOrigins(origins)
                           .AllowAnyMethod()
                           .AllowAnyHeader()
                           .AllowCredentials();

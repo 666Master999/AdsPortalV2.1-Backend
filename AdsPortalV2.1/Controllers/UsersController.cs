@@ -32,9 +32,78 @@ namespace AdsPortalV2.Controllers
         {
             var user = await _db.Users
                 .AsNoTracking()
+                .Include(u => u.Ads)
+                    .ThenInclude(ad => ad.Images)
+                .Include(u => u.Sessions)
+                .Include(u => u.Blocks)
+                .Include(u => u.ReviewsReceived)
+                .Include(u => u.ReviewsWritten)
+                .Include(u => u.AdminLogs)
+                .Include(u => u.ConversationsAsSeller)
+                .Include(u => u.ConversationsAsBuyer)
                 .FirstOrDefaultAsync(u => u.Id == id);
 
-            return user is null ? NotFound() : Ok(user);
+            if (user is null)
+            {
+                return NotFound();
+            }
+
+            var currentUserId = User.FindFirst("id")?.Value;
+            List<int>? currentUserFavorites = null;
+
+            if (!string.IsNullOrEmpty(currentUserId) && int.TryParse(currentUserId, out var parsedCurrentUserId))
+            {
+                currentUserFavorites = await _db.UserFavoriteAds
+                    .Where(fav => fav.UserId == parsedCurrentUserId)
+                    .Select(fav => fav.Ad.Id)
+                    .ToListAsync();
+            }
+
+            return Ok(new
+            {
+                UserProfile = new
+                {
+                    user.Id,
+                    user.UserLogin,
+                    user.UserName,
+                    user.UserEmail,
+                    user.UserPhoneNumber,
+                    user.AvatarPath,
+                    user.IsAdmin,
+                    user.IsBlocked,
+                    user.CreatedAt,
+                    user.LastActivityAt,
+                    Ads = user.Ads.Select(ad => new
+                    {
+                        ad.Id,
+                        ad.Title,
+                        ad.Description,
+                        ad.Price,
+                        ad.City,
+                        ad.Type,
+                        ad.IsNegotiable,
+                        ad.CreatedAt,
+                        ad.UpdatedAt,
+                        ad.ViewsCount,
+                        ad.FavoritesCount,
+                        ad.ModerationStatus,
+                        ad.IsDeleted,
+                        ad.UserId,
+                        Category = ad.Category == null ? null : new
+                        {
+                            ad.Category.Id,
+                            ad.Category.Name
+                        },
+                        MainImage = ad.Images.FirstOrDefault(img => img.IsMain == true)?.FilePath,
+                    }),
+                    Sessions = user.Sessions,
+                    Blocks = user.Blocks,
+                    ReviewsReceived = user.ReviewsReceived,
+                    ReviewsWritten = user.ReviewsWritten,
+                    AdminLogs = user.AdminLogs
+                },
+                CurrentUserFavorites = currentUserFavorites
+            });
         }
 
         [Authorize]
@@ -119,6 +188,61 @@ namespace AdsPortalV2.Controllers
             });
         }
 
+        [Authorize]
+        [HttpGet("{id:int}/favorites")]
+        public async Task<IActionResult> GetFavorites(int id)
+        {
+            if (!User.TryGetUserId(out var currentUserId) || currentUserId != id)
+                return Forbid();
+
+            var favorites = await _db.UserFavoriteAds
+                .AsNoTracking()
+                .Where(f => f.UserId == id)
+                .Select(f => new { f.AdId, f.AddedAt })
+                .ToListAsync();
+
+            return Ok(favorites);
+        }
+
+        [Authorize]
+        [HttpPost("{id:int}/favorites")]
+        public async Task<IActionResult> AddToFavorites(int id, [FromBody] int adId)
+        {
+            if (!User.TryGetUserId(out var currentUserId) || currentUserId != id)
+                return Forbid();
+
+            var ad = await _db.Ads.FindAsync(adId);
+            if (ad == null) return NotFound();
+
+            var exists = await _db.UserFavoriteAds.AnyAsync(f => f.UserId == id && f.AdId == adId);
+            if (exists) return Conflict(new { message = "Already in favorites." });
+
+            _db.UserFavoriteAds.Add(new UserFavoriteAd { UserId = id, AdId = adId });
+            ad.FavoritesCount++;
+            await _db.SaveChangesAsync();
+
+            return Ok(new { adId, addedAt = DateTime.UtcNow });
+        }
+
+        [Authorize]
+        [HttpDelete("{id:int}/favorites/{adId:int}")]
+        public async Task<IActionResult> RemoveFromFavorites(int id, int adId)
+        {
+            if (!User.TryGetUserId(out var currentUserId) || currentUserId != id)
+                return Forbid();
+
+            var favorite = await _db.UserFavoriteAds.FirstOrDefaultAsync(f => f.UserId == id && f.AdId == adId);
+            if (favorite == null) return NotFound();
+
+            var ad = await _db.Ads.FindAsync(adId);
+            if (ad != null && ad.FavoritesCount > 0) ad.FavoritesCount--;
+
+            _db.UserFavoriteAds.Remove(favorite);
+            await _db.SaveChangesAsync();
+
+            return Ok();
+        }
+
         [HttpGet("{id:int}/ads")]
         public async Task<IActionResult> GetAds(int id)
         {
@@ -201,22 +325,8 @@ namespace AdsPortalV2.Controllers
         // --- Helpers ---
 
         // Проверка: владелец ресурса или админ.
-        private async Task<bool> IsOwnerOrAdminAsync(int currentUserId, int resourceOwnerId)
-        {
-            if (currentUserId == resourceOwnerId) return true;
-
-            // Сначала проверяем роль в токене
-            if (User.IsInRole("Admin")) return true;
-
-            // Если роли нет в токене, падаем на флаг в БД
-            var currentUser = await _db.Users
-                .AsNoTracking()
-                .Where(u => u.Id == currentUserId)
-                .Select(u => new { u.IsAdmin })
-                .FirstOrDefaultAsync();
-
-            return currentUser?.IsAdmin ?? false;
-        }
+        private Task<bool> IsOwnerOrAdminAsync(int currentUserId, int resourceOwnerId) =>
+            Task.FromResult(currentUserId == resourceOwnerId || User.IsAdmin());
     }
 
     // --- ClaimsPrincipal extensions ---
@@ -231,5 +341,8 @@ namespace AdsPortalV2.Controllers
             if (string.IsNullOrWhiteSpace(idValue)) return false;
             return int.TryParse(idValue, out userId);
         }
+
+        public static bool IsAdmin(this ClaimsPrincipal user) =>
+            user.FindFirstValue("isAdmin") == "True";
     }
 }
