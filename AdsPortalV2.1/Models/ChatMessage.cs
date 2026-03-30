@@ -9,27 +9,21 @@ public class ChatMessage
     public int AuthorId { get; set; }
     public DateTime CreatedAt { get; set; }
     public string? Text { get; set; }
-    public List<string>? Attachments { get; set; }
-    public bool IsRead { get; set; }
-    public DateTime? ReadAt { get; set; }
+    public List<ChatAttachment>? Attachments { get; set; }
     public int? ReplyToMessageId { get; set; }
     public DateTime? EditedAt { get; set; }
     public DateTime? DeletedAt { get; set; }
-    public bool Edited => EditedAt.HasValue;
-    public bool Deleted => DeletedAt.HasValue;
 }
 
-public class ClusterMeta
-{
-    public int MessageCount { get; set; }
-    public int FirstMessageId { get; set; }
-    public int LastMessageId { get; set; }
-}
+// { "url": "/files/...", "type": "Image" }
+public record ChatAttachment(string Url, string Type);
 
 public class DialogMeta
 {
-    public int TotalClusters { get; set; }
     public int TotalMessages { get; set; }
-    public long LastClusterSize { get; set; }
     public int LastMessageId { get; set; }
+    public int LastFileIndex { get; set; }
+    public long LastFileSize { get; set; }
+    // FileFirstMessageIds[i] = первый id сообщения в messages_{i}.jsonl
+    public List<int> FileFirstMessageIds { get; set; } = [];
 }

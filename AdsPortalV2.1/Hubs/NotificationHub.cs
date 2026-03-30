@@ -18,6 +18,16 @@ public class NotificationHub(AppDbContext db) : Hub
         await base.OnConnectedAsync();
     }
 
+    public async Task JoinConversation(int conversationId)
+    {
+        if (Context.User?.TryGetUserId(out var userId) != true) return;
+        var ok = await db.Conversations.AnyAsync(c => c.Id == conversationId && (c.SellerId == userId || c.BuyerId == userId));
+        if (ok) await Groups.AddToGroupAsync(Context.ConnectionId, $"conversation:{conversationId}");
+    }
+
+    public Task LeaveConversation(int conversationId)
+        => Groups.RemoveFromGroupAsync(Context.ConnectionId, $"conversation:{conversationId}");
+
     public async Task RequestNotifications()
     {
         if (Context.User?.TryGetUserId(out var userId) != true) return;
