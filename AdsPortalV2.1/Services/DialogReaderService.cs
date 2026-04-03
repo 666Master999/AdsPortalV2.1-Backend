@@ -1,20 +1,13 @@
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using AdsPortalV2.Data;
 using AdsPortalV2.Entities;
 using AdsPortalV2.Models;
+using static AdsPortalV2.Services.DialogHelpers;
 
 namespace AdsPortalV2.Services;
 
 public class DialogReaderService(IWebHostEnvironment env)
 {
-    private static readonly JsonSerializerOptions s_jsonl = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        PropertyNameCaseInsensitive = true,
-        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
-    };
-
     // scroll up: id < beforeId
     public async Task<(List<ChatMessage> Messages, bool HasMore)> GetMessagesAsync(
         Conversation conv, int count, int? beforeId = null)
@@ -114,23 +107,6 @@ public class DialogReaderService(IWebHostEnvironment env)
         if (!File.Exists(path)) return null;
         return JsonSerializer.Deserialize<DialogMeta>(await File.ReadAllTextAsync(path), s_jsonl);
     }
-
-    // бинарный поиск по FileFirstMessageIds
-    private static int FindFileIndex(DialogMeta meta, int messageId)
-    {
-        var ids = meta.FileFirstMessageIds;
-        if (ids.Count == 0) return 0;
-        int lo = 0, hi = ids.Count - 1;
-        while (lo < hi)
-        {
-            var mid = (lo + hi + 1) / 2;
-            if (ids[mid] <= messageId) lo = mid;
-            else hi = mid - 1;
-        }
-        return lo;
-    }
-
-    private static string BuildFileName(int index) => $"messages_{index}.jsonl";
 
     private string GetFolder(Conversation conv)
     {

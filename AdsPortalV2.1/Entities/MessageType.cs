@@ -5,8 +5,8 @@ public enum MessageType
     Text,
     Image,
     File,
-    Link
-    ,Audio
-    ,Video
-    ,Document
+    Link,
+    Audio,
+    Video,
+    Document
 }

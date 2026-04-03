@@ -1,14 +1,13 @@
 ﻿using AdsPortalV2.Data;
 using AdsPortalV2.Entities;
+using AdsPortalV2.Models;
 using AdsPortalV2.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using System.Linq.Expressions;
 using System.Reflection;
 using System.Security.Claims;
 using System.Text.Json;
-using SixLabors.ImageSharp;
 
 namespace AdsPortalV2.Controllers
 {
@@ -16,15 +15,19 @@ namespace AdsPortalV2.Controllers
     [Route("users")]
     public class UsersController : ControllerBase
     {
+        private static readonly HashSet<string> _allowedUserFields = ["UserLogin", "UserName", "UserEmail", "UserPhoneNumber", "AvatarPath"];
+
         private readonly AppDbContext _db;
         private readonly ImageService _imageService;
         private readonly IWebHostEnvironment _env;
+        private readonly OnlineUserTracker _tracker;
 
-        public UsersController(AppDbContext db, ImageService imageService, IWebHostEnvironment env)
+        public UsersController(AppDbContext db, ImageService imageService, IWebHostEnvironment env, OnlineUserTracker tracker)
         {
             _db = db;
             _imageService = imageService;
             _env = env;
+            _tracker = tracker;
         }
 
         [HttpGet("{id:int}")]
@@ -32,36 +35,8 @@ namespace AdsPortalV2.Controllers
         {
             var user = await _db.Users
                 .AsNoTracking()
-                .Include(u => u.Ads)
-                    .ThenInclude(ad => ad.Images)
-                .Include(u => u.Sessions)
-                .Include(u => u.Blocks)
-                .Include(u => u.ReviewsReceived)
-                .Include(u => u.ReviewsWritten)
-                .Include(u => u.AdminLogs)
-                .Include(u => u.ConversationsAsSeller)
-                .Include(u => u.ConversationsAsBuyer)
-                .FirstOrDefaultAsync(u => u.Id == id);
-
-            if (user is null)
-            {
-                return NotFound();
-            }
-
-            var currentUserId = User.FindFirst("id")?.Value;
-            List<int>? currentUserFavorites = null;
-
-            if (!string.IsNullOrEmpty(currentUserId) && int.TryParse(currentUserId, out var parsedCurrentUserId))
-            {
-                currentUserFavorites = await _db.UserFavoriteAds
-                    .Where(fav => fav.UserId == parsedCurrentUserId)
-                    .Select(fav => fav.Ad.Id)
-                    .ToListAsync();
-            }
-
-            return Ok(new
-            {
-                UserProfile = new
+                .Where(u => u.Id == id)
+                .Select(user => new
                 {
                     user.Id,
                     user.UserLogin,
@@ -79,7 +54,10 @@ namespace AdsPortalV2.Controllers
                         ad.Title,
                         ad.Description,
                         ad.Price,
-                        ad.City,
+                        ad.CityId,
+                        ad.DistrictId,
+                        City = ad.CityRef == null ? null : new LocationRef("city", ad.CityRef.Id, ad.CityRef.Name),
+                        District = ad.District == null ? null : new LocationRef("district", ad.District.Id, ad.District.Name),
                         ad.Type,
                         ad.IsNegotiable,
                         ad.CreatedAt,
@@ -94,13 +72,39 @@ namespace AdsPortalV2.Controllers
                             ad.Category.Id,
                             ad.Category.Name
                         },
-                        MainImage = ad.Images.FirstOrDefault(img => img.IsMain == true)?.FilePath,
-                    }),
-                    Sessions = user.Sessions,
-                    Blocks = user.Blocks,
-                    ReviewsReceived = user.ReviewsReceived,
-                    ReviewsWritten = user.ReviewsWritten,
-                    AdminLogs = user.AdminLogs
+                        MainImage = ad.Images.Where(img => img.IsMain).Select(img => img.FilePath).FirstOrDefault(),
+                    })
+                })
+                .FirstOrDefaultAsync();
+
+            if (user is null)
+                return NotFound();
+
+            List<int>? currentUserFavorites = null;
+            if (User.TryGetUserId(out var currentUserId))
+            {
+                currentUserFavorites = await _db.UserFavoriteAds
+                    .Where(fav => fav.UserId == currentUserId)
+                    .Select(fav => fav.AdId)
+                    .ToListAsync();
+            }
+
+            return Ok(new
+            {
+                UserProfile = new
+                {
+                    user.Id,
+                    user.UserLogin,
+                    user.UserName,
+                    user.UserEmail,
+                    user.UserPhoneNumber,
+                    user.AvatarPath,
+                    user.IsAdmin,
+                    user.IsBlocked,
+                    IsOnline = _tracker.IsOnline(user.Id),
+                    user.CreatedAt,
+                    user.LastActivityAt,
+                    user.Ads
                 },
                 CurrentUserFavorites = currentUserFavorites
             });
@@ -113,7 +117,7 @@ namespace AdsPortalV2.Controllers
             if (!User.TryGetUserId(out var currentUserId))
                 return Unauthorized();
 
-            if (!await IsOwnerOrAdminAsync(currentUserId, id))
+            if (!IsOwnerOrAdmin(currentUserId, id))
                 return Forbid();
 
             var user = await _db.Users.FindAsync(id);
@@ -148,16 +152,9 @@ namespace AdsPortalV2.Controllers
                     BindingFlags.IgnoreCase | BindingFlags.Public | BindingFlags.Instance
                 );
 
-                if (prop == null || !prop.CanWrite)
+                if (prop == null || !prop.CanWrite || !_allowedUserFields.Contains(prop.Name))
                 {
-                    skipped.Add($"{key} (no such property)");
-                    continue;
-                }
-
-                // запрещённые поля
-                if (prop.Name is "Id" or "IsAdmin" or "CreatedAt")
-                {
-                    skipped.Add($"{key} (protected)");
+                    skipped.Add($"{key} (not allowed)");
                     continue;
                 }
 
@@ -198,7 +195,26 @@ namespace AdsPortalV2.Controllers
             var favorites = await _db.UserFavoriteAds
                 .AsNoTracking()
                 .Where(f => f.UserId == id)
-                .Select(f => new { f.AdId, f.AddedAt })
+                .Join(_db.Ads, f => f.AdId, a => a.Id, (f, a) => new { Ad = a, f.AddedAt })
+                .Select(x => new
+                {
+                    id = x.Ad.Id,
+                    title = x.Ad.Title,
+                    price = x.Ad.Price,
+                    isNegotiable = x.Ad.IsNegotiable,
+                    mainImage = x.Ad.Images.Where(img => img.IsMain).Select(img => img.FilePath).FirstOrDefault(),
+                    mainImageUrl = x.Ad.Images.Where(img => img.IsMain).Select(img => img.FilePath).FirstOrDefault(),
+                    createdAt = x.Ad.CreatedAt,
+                    updatedAt = x.Ad.UpdatedAt,
+                    cityRef = x.Ad.CityRef == null ? null : new LocationRef("city", x.Ad.CityRef.Id, x.Ad.CityRef.Name),
+                    districtRef = x.Ad.District == null ? null : new LocationRef("district", x.Ad.District.Id, x.Ad.District.Name),
+                    viewsCount = x.Ad.ViewsCount,
+                    favoritesCount = x.Ad.FavoritesCount,
+                    moderationStatus = x.Ad.ModerationStatus,
+                    status = x.Ad.ModerationStatus,
+                    isFavorite = true,
+                    userId = x.Ad.UserId
+                })
                 .ToListAsync();
 
             return Ok(favorites);
@@ -211,15 +227,14 @@ namespace AdsPortalV2.Controllers
             if (!User.TryGetUserId(out var currentUserId) || currentUserId != id)
                 return Forbid();
 
-            var ad = await _db.Ads.FindAsync(adId);
-            if (ad == null) return NotFound();
+            if (!await _db.Ads.AnyAsync(a => a.Id == adId)) return NotFound();
 
             var exists = await _db.UserFavoriteAds.AnyAsync(f => f.UserId == id && f.AdId == adId);
-            if (exists) return Conflict(new { message = "Already in favorites." });
+            if (exists) return Conflict(new ApiError("conflict", "Already in favorites."));
 
             _db.UserFavoriteAds.Add(new UserFavoriteAd { UserId = id, AdId = adId });
-            ad.FavoritesCount++;
             await _db.SaveChangesAsync();
+            await _db.Ads.Where(a => a.Id == adId).ExecuteUpdateAsync(s => s.SetProperty(a => a.FavoritesCount, a => a.FavoritesCount + 1));
 
             return Ok(new { adId, addedAt = DateTime.UtcNow });
         }
@@ -234,11 +249,10 @@ namespace AdsPortalV2.Controllers
             var favorite = await _db.UserFavoriteAds.FirstOrDefaultAsync(f => f.UserId == id && f.AdId == adId);
             if (favorite == null) return NotFound();
 
-            var ad = await _db.Ads.FindAsync(adId);
-            if (ad != null && ad.FavoritesCount > 0) ad.FavoritesCount--;
-
             _db.UserFavoriteAds.Remove(favorite);
             await _db.SaveChangesAsync();
+            await _db.Ads.Where(a => a.Id == adId && a.FavoritesCount > 0)
+                .ExecuteUpdateAsync(s => s.SetProperty(a => a.FavoritesCount, a => a.FavoritesCount - 1));
 
             return Ok();
         }
@@ -248,6 +262,29 @@ namespace AdsPortalV2.Controllers
         {
             var ads = await _db.Ads
                 .AsNoTracking()
+                .Where(a => a.UserId == id)
+                .Select(ad => new
+                {
+                    ad.Id,
+                    ad.Title,
+                    ad.Description,
+                    ad.Price,
+                    ad.CityId,
+                    ad.DistrictId,
+                    City = ad.CityRef == null ? null : new LocationRef("city", ad.CityRef.Id, ad.CityRef.Name),
+                    District = ad.District == null ? null : new LocationRef("district", ad.District.Id, ad.District.Name),
+                    ad.Type,
+                    ad.IsNegotiable,
+                    ad.CreatedAt,
+                    ad.UpdatedAt,
+                    ad.ViewsCount,
+                    ad.FavoritesCount,
+                    ad.ModerationStatus,
+                    ad.IsDeleted,
+                    ad.UserId,
+                    Category = ad.Category == null ? null : new { ad.Category.Id, ad.Category.Name },
+                    MainImage = ad.Images.Where(img => img.IsMain).Select(img => img.FilePath).FirstOrDefault()
+                })
                 .ToListAsync();
 
             return Ok(ads);
@@ -257,6 +294,7 @@ namespace AdsPortalV2.Controllers
         public async Task<IActionResult> GetUserProfile(int id)
         {
             var currentUserId = User.TryGetUserId(out var uid) ? uid : 0;
+            var isOwner = currentUserId == id;
 
             var profile = await _db.Users
                 .AsNoTracking()
@@ -267,11 +305,32 @@ namespace AdsPortalV2.Controllers
                     u.UserName,
                     u.AvatarPath,
                     u.CreatedAt,
-                    UserEmail = currentUserId == id ? u.UserEmail : null,
-                    UserPhoneNumber = currentUserId == id ? u.UserPhoneNumber : null,
-                    IsAdmin = currentUserId == id ? u.IsAdmin : (bool?)null,
-                    IsBlocked = currentUserId == id ? u.IsBlocked : (bool?)null,
-                    Ads = currentUserId == id ? u.Ads : null
+                    UserEmail = isOwner ? u.UserEmail : null,
+                    UserPhoneNumber = isOwner ? u.UserPhoneNumber : null,
+                    IsAdmin = isOwner ? u.IsAdmin : (bool?)null,
+                    IsBlocked = isOwner ? u.IsBlocked : (bool?)null,
+                    Ads = isOwner ? u.Ads.Select(ad => new
+                    {
+                        ad.Id,
+                        ad.Title,
+                        ad.Description,
+                        ad.Price,
+                        ad.CityId,
+                        ad.DistrictId,
+                        City = ad.CityRef == null ? null : new LocationRef("city", ad.CityRef.Id, ad.CityRef.Name),
+                        District = ad.District == null ? null : new LocationRef("district", ad.District.Id, ad.District.Name),
+                        ad.Type,
+                        ad.IsNegotiable,
+                        ad.CreatedAt,
+                        ad.UpdatedAt,
+                        ad.ViewsCount,
+                        ad.FavoritesCount,
+                        ad.ModerationStatus,
+                        ad.IsDeleted,
+                        ad.UserId,
+                        Category = ad.Category == null ? null : new { ad.Category.Id, ad.Category.Name },
+                        MainImage = ad.Images.Where(img => img.IsMain).Select(img => img.FilePath).FirstOrDefault()
+                    }) : null
                 })
                 .FirstOrDefaultAsync();
 
@@ -283,11 +342,11 @@ namespace AdsPortalV2.Controllers
         public async Task<IActionResult> UploadAvatar(int id, IFormFile avatar)
         {
             if (!User.TryGetUserId(out var currentUserId)) return Unauthorized();
-            if (!await IsOwnerOrAdminAsync(currentUserId, id)) return Forbid();
+            if (!IsOwnerOrAdmin(currentUserId, id)) return Forbid();
 
             var user = await _db.Users.FindAsync(id);
             if (user is null) return NotFound();
-            if (avatar == null || avatar.Length == 0) return BadRequest(new { message = "No file uploaded." });
+            if (avatar == null || avatar.Length == 0) return BadRequest(new ApiError("validation_error", "No file uploaded."));
 
             var webRoot = _env.WebRootPath ?? "wwwroot";
             var uploadsFolder = Path.Combine(webRoot, "files", id.ToString(), "Avatars");
@@ -308,9 +367,7 @@ namespace AdsPortalV2.Controllers
             await avatar.CopyToAsync(ms);
             ms.Position = 0;
 
-            // фиксированное имя, перезаписывается каждый раз
             var avatarFileName = "avatar.jpg";
-            ms.Position = 0;
             await _imageService.SaveCompressedImageAsync(ms, uploadsFolder, avatarFileName, targetKb: 100, minQuality: 1);
 
             // кеш‑бастер, чтобы клиент видел обновление
@@ -325,8 +382,8 @@ namespace AdsPortalV2.Controllers
         // --- Helpers ---
 
         // Проверка: владелец ресурса или админ.
-        private Task<bool> IsOwnerOrAdminAsync(int currentUserId, int resourceOwnerId) =>
-            Task.FromResult(currentUserId == resourceOwnerId || User.IsAdmin());
+        private bool IsOwnerOrAdmin(int currentUserId, int resourceOwnerId) =>
+            currentUserId == resourceOwnerId || User.IsAdmin();
     }
 
     // --- ClaimsPrincipal extensions ---

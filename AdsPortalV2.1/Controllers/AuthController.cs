@@ -1,9 +1,9 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
-using System.Security.Cryptography;
 using System.Text;
 using AdsPortalV2.Data;
 using AdsPortalV2.Entities;
+using AdsPortalV2.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -12,7 +12,7 @@ namespace AdsPortalV2.Controllers;
 
 [ApiController]
 [Route("auth")]
-public class AuthController(AppDbContext db, IConfiguration config) : ControllerBase
+public class AuthController(AppDbContext db, IConfiguration config, ILogger<AuthController> logger) : ControllerBase
 {
     private readonly SymmetricSecurityKey _key = new(Encoding.UTF8.GetBytes(config["Jwt:Key"]!));
 
@@ -31,12 +31,13 @@ public class AuthController(AppDbContext db, IConfiguration config) : Controller
         var user = new User
         {
             UserLogin = request.UserLogin,
-            UserPasswordHash = HashPassword(request.UserPassword)
+            UserPasswordHash = PasswordService.Hash(request.UserPassword)
         };
 
         db.Users.Add(user);
         await db.SaveChangesAsync();
 
+        logger.LogInformation("User registered: {Login} (id={Id})", user.UserLogin, user.Id);
         return Ok(AuthSuccess(user));
     }
 
@@ -44,9 +45,19 @@ public class AuthController(AppDbContext db, IConfiguration config) : Controller
     public async Task<IActionResult> Login([FromBody] LoginRequest request)
     {
         var user = await db.Users.FirstOrDefaultAsync(u => u.UserLogin == request.UserLogin);
-        if (user == null || user.UserPasswordHash != HashPassword(request.UserPassword))
+        if (user == null || !PasswordService.Verify(user.UserPasswordHash, request.UserPassword))
+        {
+            logger.LogWarning("Failed login attempt for: {Login}", request.UserLogin);
             return Unauthorized(new ApiResponse { Success = false, Message = "Invalid login or password" });
+        }
 
+        if (PasswordService.IsLegacyHash(user.UserPasswordHash))
+        {
+            user.UserPasswordHash = PasswordService.Hash(request.UserPassword);
+            await db.SaveChangesAsync();
+        }
+
+        logger.LogInformation("User logged in: {Login} (id={Id})", user.UserLogin, user.Id);
         return Ok(AuthSuccess(user));
     }
 
@@ -80,14 +91,11 @@ public class AuthController(AppDbContext db, IConfiguration config) : Controller
                 new Claim(ClaimTypes.Name, user.UserLogin),
                 new Claim("isAdmin", user.IsAdmin.ToString())
             ],
-            expires: DateTime.UtcNow.AddDays(7),
+            expires: DateTime.UtcNow.AddHours(24),
             signingCredentials: credentials);
 
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
-
-    private static string HashPassword(string password) =>
-        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(password)));
 }
 
 public record RegisterRequest(string UserLogin, string UserPassword);

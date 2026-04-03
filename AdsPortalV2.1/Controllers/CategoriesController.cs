@@ -18,6 +18,7 @@ public class CategoriesController(AppDbContext db) : ControllerBase
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] Category category)
     {
+        if (!User.IsAdmin()) return Forbid();
         db.Categories.Add(category);
         await db.SaveChangesAsync();
         return Ok(category);
@@ -27,6 +28,7 @@ public class CategoriesController(AppDbContext db) : ControllerBase
     [HttpPut("{id}")]
     public async Task<IActionResult> Update(int id, [FromBody] Category updated)
     {
+        if (!User.IsAdmin()) return Forbid();
         var category = await db.Categories.FindAsync(id);
         if (category == null) return NotFound();
 
@@ -41,6 +43,7 @@ public class CategoriesController(AppDbContext db) : ControllerBase
     [HttpDelete("{id}")]
     public async Task<IActionResult> Delete(int id)
     {
+        if (!User.IsAdmin()) return Forbid();
         var category = await db.Categories.FindAsync(id);
         if (category == null) return NotFound();
 

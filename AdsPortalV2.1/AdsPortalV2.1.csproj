@@ -16,12 +16,22 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.3" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" Version="10.0.3" />
     <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
   </ItemGroup>
 
   <ItemGroup>
+    <Folder Include="ModelBinders\" />
     <Folder Include="Views\Shared\" />
     <Folder Include="wwwroot\files\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Пользовательские загрузки — не включать в publish, они живут на сервере -->
+    <Content Update="wwwroot\files\**\*" CopyToPublishDirectory="Never" />
+    <!-- ffmpeg — большой бинарник, деплоим отдельно (см. README) -->
+    <Content Update="wwwroot\tools\**\*" CopyToPublishDirectory="Never" />
   </ItemGroup>
 
 </Project>

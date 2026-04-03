@@ -8,14 +8,21 @@ public class Ad
     public int UserId { get; set; }
     public int? CategoryId { get; set; }
 
+    [MaxLength(200)]
     public string Title { get; set; } = string.Empty;
+    [MaxLength(5000)]
     public string? Description { get; set; }
 
     public decimal? Price { get; set; }
 
-    public string? City { get; set; }
+    [MaxLength(50)]
     public string? Type { get; set; }
     public bool IsNegotiable { get; set; }
+
+    public int? CityId { get; set; }
+    public int? DistrictId { get; set; }
+    public City? CityRef { get; set; }
+    public District? District { get; set; }
 
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }

@@ -1,6 +1,5 @@
 using System.Collections.Immutable;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using AdsPortalV2.Data;
 using AdsPortalV2.Entities;
@@ -9,18 +8,12 @@ using AdsPortalV2.Models;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
+using static AdsPortalV2.Services.DialogHelpers;
 
 namespace AdsPortalV2.Services;
 
-public class DialogWriterService(IServiceScopeFactory scopeFactory, IWebHostEnvironment env, IHubContext<NotificationHub> hub) : IHostedService
+public class DialogWriterService(IServiceScopeFactory scopeFactory, IWebHostEnvironment env, IHubContext<NotificationHub> hub, IHubContext<OnlineHub> onlineHub) : IHostedService
 {
-    private static readonly JsonSerializerOptions s_jsonl = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        PropertyNameCaseInsensitive = true,
-        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
-    };
-
     private readonly Channel<WriteCommand> _channel = Channel.CreateUnbounded<WriteCommand>();
     private readonly Dictionary<int, int> _activeFileIndexes = new();
     // LRU: max 4000 metadata entries (unread + dialog meta), max 1000 message caches
@@ -81,6 +74,26 @@ public class DialogWriterService(IServiceScopeFactory scopeFactory, IWebHostEnvi
         conv.HasUnreadForSeller = dialogMeta != null && (await GetUnreadStateAsync(folder, dialogMeta, unreadMeta.SellerLastSeenMessageId ?? 0, conv.SellerId)).Count > 0;
         conv.HasUnreadForBuyer = dialogMeta != null && (await GetUnreadStateAsync(folder, dialogMeta, unreadMeta.BuyerLastSeenMessageId ?? 0, conv.BuyerId)).Count > 0;
         await db.SaveChangesAsync();
+
+        await onlineHub.Clients.Group($"conversation:{conversationId}").SendAsync("chat:read", new
+        {
+            conversationId,
+            userId,
+            lastSeenMessageId,
+            participants = new[]
+            {
+                new { Id = conv.SellerId, LastReadMessageId = unreadMeta.SellerLastSeenMessageId },
+                new { Id = conv.BuyerId, LastReadMessageId = unreadMeta.BuyerLastSeenMessageId }
+            }
+        });
+
+        // Notify the sender explicitly
+        await onlineHub.Clients.User(userId.ToString()).SendAsync("chat:read", new
+        {
+            conversationId,
+            userId,
+            lastSeenMessageId
+        });
     }
 
     public async Task<(int Count, int? FirstUnreadMessageId)> GetUnreadStateAsync(Conversation conv, int userId)
@@ -252,19 +265,51 @@ public class DialogWriterService(IServiceScopeFactory scopeFactory, IWebHostEnvi
             .Select(u => new { u.UserName, u.UserLogin, u.AvatarPath })
             .FirstOrDefaultAsync();
 
-        // полное сообщение — фронт не делает HTTP-запрос если чат открыт
+        // единый realtime payload
         var fullPayload = new
         {
             conversationId = conv.Id,
-            message.Id, message.Type, message.AuthorId, author, message.CreatedAt,
-            message.Text, Attachments = message.Attachments ?? [], message.ReplyToMessageId,
-            message.EditedAt, message.DeletedAt
+            message = new
+            {
+                message.Id,
+                message.Type,
+                message.AuthorId,
+                author,
+                message.CreatedAt,
+                message.Text,
+                Attachments = message.Attachments ?? [],
+                message.ReplyToMessageId,
+                message.EditedAt,
+                message.DeletedAt
+            }
         };
 
-        await hub.Clients.Group($"conversation:{conv.Id}").SendAsync("newMessage", fullPayload);
-        // Фоллбэк: отправляем полное сообщение в user:{recipientId}, чтобы получатель получил
-        // данные даже если он не вызвал JoinConversation (например чат закрыт).
-        await hub.Clients.Group($"user:{recipientId}").SendAsync("newMessage", fullPayload);
+        // Send to conversation group
+        await hub.Clients.Group($"conversation:{conv.Id}").SendAsync("chat:message", fullPayload);
+        // Also send to recipient user group as fallback
+        await hub.Clients.Group($"user:{recipientId}").SendAsync("chat:message", fullPayload);
+
+        var fullConversation = await db.Conversations
+            .AsNoTracking()
+            .Where(c => c.Id == conv.Id)
+            .Include(c => c.Ad).ThenInclude(a => a.Images)
+            .Include(c => c.Seller)
+            .Include(c => c.Buyer)
+            .FirstAsync();
+
+        var sellerUnread = await GetUnreadStateAsync(fullConversation, fullConversation.SellerId);
+        var buyerUnread = await GetUnreadStateAsync(fullConversation, fullConversation.BuyerId);
+
+        var sellerDto = fullConversation.ToDto(fullConversation.SellerId, sellerUnread.Count, sellerUnread.FirstUnreadMessageId, message.Id);
+        var buyerDto = fullConversation.ToDto(fullConversation.BuyerId, buyerUnread.Count, buyerUnread.FirstUnreadMessageId, message.Id);
+
+        await hub.Clients.Group($"user:{conv.SellerId}").SendAsync("chat:conversationUpdated", sellerDto);
+        await onlineHub.Clients.Group($"user:{conv.SellerId}").SendAsync("chat:conversationUpdated", sellerDto);
+        if (conv.BuyerId != conv.SellerId)
+        {
+            await hub.Clients.Group($"user:{conv.BuyerId}").SendAsync("chat:conversationUpdated", buyerDto);
+            await onlineHub.Clients.Group($"user:{conv.BuyerId}").SendAsync("chat:conversationUpdated", buyerDto);
+        }
 
         return message;
     }
@@ -384,26 +429,12 @@ public class DialogWriterService(IServiceScopeFactory scopeFactory, IWebHostEnvi
         return null;
     }
 
-    private static int FindFileIndex(DialogMeta meta, int messageId)
-    {
-        var ids = meta.FileFirstMessageIds;
-        if (ids.Count == 0) return 0;
-        int lo = 0, hi = ids.Count - 1;
-        while (lo < hi)
-        {
-            var mid = (lo + hi + 1) / 2;
-            if (ids[mid] <= messageId) lo = mid;
-            else hi = mid - 1;
-        }
-        return lo;
-    }
-
-    private static string BuildFileName(int index) => $"messages_{index}.jsonl";
     private static string GetUnreadMetaPath(string folder) => Path.Combine(folder, "dialog.unread.meta.json");
 
     private string GetFolder(Conversation conv)
     {
         var webRoot = env.WebRootPath ?? "wwwroot";
+        // conv.DialogFolderPath expected to be: files/{userId}/Ads/{adId}/dialogs/{conversationId}
         return Path.Combine(webRoot, conv.DialogFolderPath.TrimStart('/').Replace('/', Path.DirectorySeparatorChar));
     }
 
@@ -411,6 +442,11 @@ public class DialogWriterService(IServiceScopeFactory scopeFactory, IWebHostEnvi
     {
         var webRoot = env.WebRootPath ?? "wwwroot";
         return Path.Combine(webRoot, dialogFolderPath.TrimStart('/').Replace('/', Path.DirectorySeparatorChar));
+    }
+
+    private string GetAttachmentFolder(Conversation conv)
+    {
+        return Path.Combine(env.WebRootPath ?? "wwwroot", conv.DialogFolderPath.TrimStart('/').Replace('/', Path.DirectorySeparatorChar));
     }
 
     private void DeleteAttachmentFile(string relativeUrl)

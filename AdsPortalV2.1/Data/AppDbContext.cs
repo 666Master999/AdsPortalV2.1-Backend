@@ -18,6 +18,9 @@ public class AppDbContext : DbContext
     public DbSet<Conversation> Conversations => Set<Conversation>();
     public DbSet<UserFavoriteAd> UserFavoriteAds => Set<UserFavoriteAd>();
     public DbSet<Notification> Notifications => Set<Notification>();
+    public DbSet<Region> Regions => Set<Region>();
+    public DbSet<City> Cities => Set<City>();
+    public DbSet<District> Districts => Set<District>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -111,5 +114,29 @@ public class AppDbContext : DbContext
             .WithMany(u => u.ReviewsReceived)
             .HasForeignKey(r => r.TargetUserId)
             .OnDelete(DeleteBehavior.NoAction);
+
+        modelBuilder.Entity<City>()
+            .HasOne(c => c.Region)
+            .WithMany(r => r.Cities)
+            .HasForeignKey(c => c.RegionId)
+            .OnDelete(DeleteBehavior.NoAction);
+
+        modelBuilder.Entity<District>()
+            .HasOne(d => d.City)
+            .WithMany(c => c.Districts)
+            .HasForeignKey(d => d.CityId)
+            .OnDelete(DeleteBehavior.NoAction);
+
+        modelBuilder.Entity<Ad>()
+            .HasOne(a => a.CityRef)
+            .WithMany()
+            .HasForeignKey(a => a.CityId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        modelBuilder.Entity<Ad>()
+            .HasOne(a => a.District)
+            .WithMany()
+            .HasForeignKey(a => a.DistrictId)
+            .OnDelete(DeleteBehavior.SetNull);
     }
 }

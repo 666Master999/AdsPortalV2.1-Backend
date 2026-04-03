@@ -11,8 +11,6 @@ namespace AdsPortalV2.Services
 {
     public class ImageService
     {
-        private static readonly char[] _chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".ToCharArray();
-
         public string GenerateShortFileName(string? ext)
         {
             if (string.IsNullOrEmpty(ext))

@@ -1,12 +1,15 @@
 using AdsPortalV2.Data;
+using AdsPortalV2.Filters;
 using AdsPortalV2.Entities;
 using AdsPortalV2.Hubs;
+using AdsPortalV2.Models;
 using AdsPortalV2.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using System.Linq.Expressions;
 using System.Reflection;
 using System.Text.Json;
 
@@ -14,8 +17,31 @@ namespace AdsPortalV2.Controllers;
 
 [ApiController]
 [Route("ads")]
-public class AdsController(AppDbContext db, ImageService _imageService, IMemoryCache _cache, IHubContext<NotificationHub> _hub) : ControllerBase
+public class AdsController(AppDbContext db, ImageService _imageService, IMemoryCache _cache, IHubContext<NotificationHub> _hub, ILogger<AdsController> _logger) : ControllerBase
 {
+    private static readonly HashSet<string> _allowedAdFields = ["Title", "Description", "Price", "IsNegotiable", "CategoryId", "Type", "CityId", "DistrictId"];
+
+    private static readonly Dictionary<string, LambdaExpression> _sortMap = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["title"]     = (Expression<Func<Ad, string>>)(ad => ad.Title),
+        ["price"]     = (Expression<Func<Ad, decimal?>>)(ad => ad.Price),
+        ["created"]   = (Expression<Func<Ad, DateTime>>)(ad => ad.CreatedAt),
+        ["createdAt"] = (Expression<Func<Ad, DateTime>>)(ad => ad.CreatedAt),
+        ["updated"]   = (Expression<Func<Ad, DateTime>>)(ad => ad.UpdatedAt),
+        ["updatedAt"] = (Expression<Func<Ad, DateTime>>)(ad => ad.UpdatedAt),
+        ["views"]     = (Expression<Func<Ad, int>>)(ad => ad.ViewsCount),
+        ["favorites"] = (Expression<Func<Ad, int>>)(ad => ad.FavoritesCount),
+    };
+
+    private static IQueryable<Ad> ApplySort(IQueryable<Ad> query, LambdaExpression keySelector, bool descending)
+    {
+        var method = descending ? nameof(Queryable.OrderByDescending) : nameof(Queryable.OrderBy);
+        var call = Expression.Call(typeof(Queryable), method,
+            [typeof(Ad), keySelector.Body.Type],
+            query.Expression, Expression.Quote(keySelector));
+        return (IQueryable<Ad>)query.Provider.CreateQuery(call);
+    }
+
     // PATCH: /ads/{id}/moderation
     [Authorize]
     [HttpPatch("{id}/moderation")]
@@ -44,6 +70,8 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
 
         await db.SaveChangesAsync();
 
+        _logger.LogInformation("Ad moderation: id={AdId} {From} -> {To}", id, previousStatus, status);
+
         if (status != previousStatus && status is ModerationStatus.Approved or ModerationStatus.Rejected)
         {
             var type = status == ModerationStatus.Approved ? NotificationType.AdApproved : NotificationType.AdRejected;
@@ -70,7 +98,10 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
                 ad.Description,
                 ad.Price,
                 ad.CategoryId,
-                ad.City,
+                ad.CityId,
+                ad.DistrictId,
+                City = ad.CityRef == null ? null : new LocationRef("city", ad.CityRef.Id, ad.CityRef.Name),
+                District = ad.District == null ? null : new LocationRef("district", ad.District.Id, ad.District.Name),
                 ad.Type,
                 ad.CreatedAt,
                 ad.UpdatedAt,
@@ -86,45 +117,51 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
 
         return Ok(result);
     }
-    // GET: /ads?sortBy=title&descending=false
+    // GET: /ads?sortBy=price&sortDir=asc&filters=[{"type":"search","value":"телефон"},{"type":"priceFrom","value":100}]
     [HttpGet]
-    public async Task<IActionResult> GetAll([FromQuery] string? sortBy, [FromQuery] bool descending = false, [FromQuery] int? categoryId = null, [FromQuery] List<int>? ids = null)
+    public async Task<IActionResult> GetAll(
+        [FromQuery] string? sortBy,
+        [FromQuery] string? sortDir,
+        [FromQuery] string? filters = null,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20)
     {
-        IQueryable<Ad> query;
-        var userIdClaim = User.FindFirst("id")?.Value;
-        bool isAdmin = false;
-        int? userId = null;
+        page = Math.Max(1, page);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+        bool descending = !string.Equals(sortDir, "asc", StringComparison.OrdinalIgnoreCase);
 
-        if (userIdClaim != null && int.TryParse(userIdClaim, out var parsedUserId))
+        int? currentUserId = User.TryGetUserId(out var uid) ? uid : null;
+        bool isAdmin = currentUserId.HasValue && User.IsAdmin();
+
+        IQueryable<Ad> query = isAdmin
+            ? db.Ads
+            : db.Ads.Where(ad => !ad.IsDeleted && (ad.ModerationStatus == ModerationStatus.Approved || (currentUserId.HasValue && ad.UserId == currentUserId.Value)));
+
+        if (!string.IsNullOrWhiteSpace(filters))
         {
-            userId = parsedUserId;
-            isAdmin = User.IsAdmin();
+            List<FilterRef> filterList;
+            try { filterList = JsonSerializer.Deserialize<List<FilterRef>>(filters, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? []; }
+            catch { return BadRequest(new ApiError("validation_error", "Invalid filters format. Expected JSON array of {type, value}.")); }
+
+            var handlers = BuildHandlers();
+            foreach (var group in filterList.GroupBy(f => f.Type.ToLowerInvariant()))
+            {
+                if (!handlers.TryGetValue(group.Key, out var handler))
+                    return BadRequest(new ApiError("validation_error", $"Unknown filter type: '{group.Key}'."));
+                query = await handler.ApplyAsync(query, group.Key, group.Select(f => f.Value));
+            }
         }
 
-        if (isAdmin)
-        {
-            query = db.Ads;
-        }
-        else
-        {
-            query = db.Ads.Where(ad => !ad.IsDeleted && (ad.ModerationStatus == ModerationStatus.Approved || (userId.HasValue && ad.UserId == userId.Value)));
-        }
+        var sortExpr = _sortMap.GetValueOrDefault(sortBy ?? "") ?? _sortMap["createdAt"];
+        query = ApplySort(query, sortExpr, descending);
+        // вторичная сортировка для стабильного порядка
+        query = ((IOrderedQueryable<Ad>)query).ThenByDescending(ad => ad.CreatedAt);
 
-        if (categoryId.HasValue)
-            query = query.Where(ad => ad.CategoryId == categoryId.Value);
+        var totalCount = await query.CountAsync();
+        var totalPages = totalCount == 0 ? 1 : (int)Math.Ceiling((double)totalCount / pageSize);
+        page = Math.Min(page, totalPages);
 
-        if (ids?.Count > 0)
-            query = query.Where(ad => ids.Contains(ad.Id));
-
-        query = sortBy?.ToLower() switch
-        {
-            "title" => descending ? query.OrderByDescending(ad => ad.Title) : query.OrderBy(ad => ad.Title),
-            "price" => descending ? query.OrderByDescending(ad => ad.Price) : query.OrderBy(ad => ad.Price),
-            "created" => descending ? query.OrderByDescending(ad => ad.CreatedAt) : query.OrderBy(ad => ad.CreatedAt),
-            _ => query.OrderByDescending(ad => ad.CreatedAt)
-        };
-
-        var result = await query.Select(ad => new
+        var items = await query.Select(ad => new
         {
             ad.Id,
             ad.Title,
@@ -132,7 +169,8 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
             ad.Price,
             ad.IsNegotiable,
             ad.CategoryId,
-            ad.City,
+            City = ad.CityRef == null ? null : new LocationRef("city", ad.CityRef.Id, ad.CityRef.Name),
+            District = ad.District == null ? null : new LocationRef("district", ad.District.Id, ad.District.Name),
             ad.Type,
             ad.CreatedAt,
             ad.UpdatedAt,
@@ -143,11 +181,11 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
                 .Where(img => img.IsMain)
                 .Select(img => img.FilePath)
                 .FirstOrDefault(),
-            IsFavorite = userId.HasValue && db.UserFavoriteAds.Any(fav => fav.UserId == userId.Value && fav.AdId == ad.Id),
-            ModerationStatus = isAdmin || (userId.HasValue && ad.UserId == userId.Value) ? (ModerationStatus?)ad.ModerationStatus : null
-        }).ToListAsync();
+            IsFavorite = currentUserId.HasValue && db.UserFavoriteAds.Any(fav => fav.UserId == currentUserId.Value && fav.AdId == ad.Id),
+            ModerationStatus = isAdmin || (currentUserId.HasValue && ad.UserId == currentUserId.Value) ? (ModerationStatus?)ad.ModerationStatus : null
+        }).Skip((page - 1) * pageSize).Take(pageSize).ToListAsync();
 
-        return Ok(result);
+        return Ok(new { items, totalCount, page, pageSize, totalPages });
     }
 
     // GET: /ads/5
@@ -155,15 +193,8 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
     public async Task<IActionResult> GetById(int id)
     {
         // Получаем текущего пользователя
-        var userIdClaim = User.FindFirst("id")?.Value;
-        int? userId = null;
-        bool isAdmin = false;
-
-        if (!string.IsNullOrEmpty(userIdClaim) && int.TryParse(userIdClaim, out var parsedUserId))
-        {
-            userId = parsedUserId;
-            isAdmin = User.IsAdmin();
-        }
+        int? userId = User.TryGetUserId(out var uid) ? uid : null;
+        bool isAdmin = userId.HasValue && User.IsAdmin();
 
         var ad = await db.Ads.AsNoTracking()
             .Where(a => a.Id == id)
@@ -176,7 +207,11 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
                 a.Description,
                 a.Price,
                 a.IsNegotiable, // Добавляем флаг договорной цены в ответ
-                a.City,
+                a.CityId,
+                a.DistrictId,
+                City = a.CityRef == null ? null : new LocationRef("city", a.CityRef.Id, a.CityRef.Name),
+                District = a.District == null ? null : new LocationRef("district", a.District.Id, a.District.Name),
+                Region = a.CityRef == null ? null : new LocationRef("region", a.CityRef.RegionId, a.CityRef.Region!.Name),
                 a.Type,
                 a.CreatedAt,
                 a.UpdatedAt,
@@ -208,14 +243,14 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
             .FirstOrDefaultAsync();
 
         if (ad == null)
-            return NotFound(new { Message = "Объявление не найдено." });
+            return NotFound(new ApiError("not_found", "Объявление не найдено."));
 
         // Проверка доступа на основе реальных данных
         bool isOwner = userId.HasValue && ad.UserId == userId.Value;
         if (!isAdmin && !isOwner)
         {
             if (ad.IsDeleted || ad.ActualModerationStatus != ModerationStatus.Approved)
-                return new ObjectResult(new { Message = "У вас нет прав доступа к этому объявлению." }) { StatusCode = 403 };
+                return StatusCode(403, new ApiError("forbidden", "У вас нет прав доступа к этому объявлению."));
         }
 
         // Уникальный просмотр: считываем только если не сам владелец
@@ -229,14 +264,11 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
             }
         }
 
-        // Получение ID избранных объявлений текущего пользователя
-        List<int>? currentUserFavorites = null;
+        // Вычисляем IsFavorite для текущего пользователя
+        bool isFavorite = false;
         if (userId.HasValue)
         {
-            currentUserFavorites = await db.UserFavoriteAds
-                .Where(fav => fav.UserId == userId.Value)
-                .Select(fav => fav.AdId)
-                .ToListAsync();
+            isFavorite = await db.UserFavoriteAds.AnyAsync(fav => fav.UserId == userId.Value && fav.AdId == ad.Id);
         }
 
         // Формируем ответ, скрывая статус модерации от посторонних
@@ -248,8 +280,11 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
             ad.Title,
             ad.Description,
             ad.Price,
-            ad.IsNegotiable, // Добавляем флаг договорной цены
-            ad.City,
+            ad.IsNegotiable,
+            ad.CityId,
+            ad.DistrictId,
+            ad.District,
+            ad.Region,
             ad.Type,
             ad.CreatedAt,
             ad.UpdatedAt,
@@ -258,7 +293,7 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
             Category = ad.Category,
             User = ad.User,
             Images = ad.Images,
-            CurrentUserFavorites = currentUserFavorites
+            IsFavorite = isFavorite
         };
 
         return Ok(response);
@@ -273,15 +308,14 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
         [FromForm] int? mainImageIndex)
     {
         if (string.IsNullOrWhiteSpace(ad.Title))
-            return BadRequest("Title is required.");
+            return BadRequest(new ApiError("validation_error", "Title is required."));
         if (!ad.CategoryId.HasValue)
-            return BadRequest("CategoryId is required.");
+            return BadRequest(new ApiError("validation_error", "CategoryId is required."));
 
-        var userIdClaim = User.FindFirst("id")?.Value;
-        if (userIdClaim == null)
+        if (!User.TryGetUserId(out var creatorId))
             return Unauthorized();
 
-        ad.UserId = int.Parse(userIdClaim);
+        ad.UserId = creatorId;
         ad.CreatedAt = DateTime.UtcNow;
         ad.UpdatedAt = DateTime.UtcNow;
         ad.IsDeleted = false;
@@ -289,6 +323,8 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
 
         db.Ads.Add(ad);
         await db.SaveChangesAsync();
+
+        _logger.LogInformation("Ad created: id={AdId} by user={UserId}", ad.Id, creatorId);
 
         if (files?.Count > 0)
         {
@@ -323,13 +359,14 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
             return NotFound();
 
         // Проверка авторства
-        var userIdClaim = User.FindFirst("id")?.Value;
-        if (userIdClaim == null || ad.UserId != int.Parse(userIdClaim))
+        if (!User.TryGetUserId(out var currentUserId) || ad.UserId != currentUserId)
             return Forbid();
 
         ad.IsDeleted = true;
         ad.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync();
+
+        _logger.LogInformation("Ad deleted: id={AdId} by user={UserId}", id, currentUserId);
         return Ok();
     }
 
@@ -341,12 +378,11 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
         if (ad == null)
             return NotFound();
 
-        var userIdClaim = User.FindFirst("id")?.Value;
-        if (userIdClaim == null)
+        if (!User.TryGetUserId(out var currentUserId))
             return Unauthorized();
 
         // Проверка прав доступа
-        if (!User.IsAdmin() && ad.UserId != int.Parse(userIdClaim))
+        if (!User.IsAdmin() && ad.UserId != currentUserId)
             return Forbid();
 
         var updated = new List<string>();
@@ -463,15 +499,9 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
 
             // Обработка обычных свойств
             var prop = typeof(Ad).GetProperty(key, BindingFlags.IgnoreCase | BindingFlags.Public | BindingFlags.Instance);
-            if (prop == null || !prop.CanWrite)
+            if (prop == null || !prop.CanWrite || !_allowedAdFields.Contains(prop.Name))
             {
-                skipped.Add($"{key} (no such property)");
-                continue;
-            }
-
-            if (prop.Name is "Id" or "UserId" or "CreatedAt")
-            {
-                skipped.Add($"{key} (protected)");
+                skipped.Add($"{key} (not allowed)");
                 continue;
             }
 
@@ -527,10 +557,20 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
         });
     }
 
+    [Authorize]
+    [HttpGet("{id}/is-favorite")]
+    public async Task<IActionResult> IsFavorite(int id)
+    {
+        if (!User.TryGetUserId(out var userId)) return Unauthorized();
+        var result = await db.UserFavoriteAds.AnyAsync(f => f.UserId == userId && f.AdId == id);
+        return Ok(result);
+    }
+
     private async Task<List<AdImage>> SaveAdImages(int adId, List<IFormFile> files, int? mainImageIndex)
     {
-        var userId = User.FindFirst("id")?.Value ?? throw new UnauthorizedAccessException();
-        var uploadPath = Path.Combine("wwwroot", "files", userId, "Ads", adId.ToString());
+        if (!User.TryGetUserId(out var ownerId)) throw new UnauthorizedAccessException();
+        var userIdStr = ownerId.ToString();
+        var uploadPath = Path.Combine("wwwroot", "files", userIdStr, "Ads", adId.ToString());
         Directory.CreateDirectory(uploadPath);
 
         var savedImages = new List<AdImage>();
@@ -544,7 +584,7 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
             await using var stream = file.OpenReadStream();
             await _imageService.SaveCompressedImageAsync(stream, uploadPath, fileName);
 
-            var relativePath = Path.Combine("files", userId, "Ads", adId.ToString(), fileName);
+            var relativePath = Path.Combine("files", userIdStr, "Ads", adId.ToString(), fileName);
 
             var adImage = new AdImage
             {
@@ -570,22 +610,16 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
         if (ad == null)
             return NotFound();
 
-        var userIdClaim = User.FindFirst("id")?.Value;
-        if (userIdClaim == null)
+        if (!User.TryGetUserId(out var uploadUserId))
             return Unauthorized();
 
-        var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == int.Parse(userIdClaim));
-        if (user == null)
-            return Unauthorized();
-
-        // Проверка прав доступа
-        if (!user.IsAdmin && ad.UserId != int.Parse(userIdClaim))
+        if (!User.IsAdmin() && ad.UserId != uploadUserId)
             return Forbid();
 
         if (files == null || files.Count == 0)
-            return BadRequest("No files");
+            return BadRequest(new ApiError("validation_error", "No files provided."));
 
-        var uploadDir = Path.Combine("wwwroot", "files", userIdClaim, "Ads", id.ToString());
+        var uploadDir = Path.Combine("wwwroot", "files", uploadUserId.ToString(), "Ads", id.ToString());
         Directory.CreateDirectory(uploadDir);
 
         var uploadedPaths = new List<string>();
@@ -598,10 +632,19 @@ public class AdsController(AppDbContext db, ImageService _imageService, IMemoryC
             await using var stream = file.OpenReadStream();
             await _imageService.SaveCompressedImageAsync(stream, uploadDir, fileName);
 
-            var relativePath = Path.Combine("files", userIdClaim, "Ads", id.ToString(), fileName).Replace('\\', '/');
+            var relativePath = Path.Combine("files", uploadUserId.ToString(), "Ads", id.ToString(), fileName).Replace('\\', '/');
             uploadedPaths.Add(relativePath);
         }
 
         return Ok(new { files = uploadedPaths });
     }
+
+    private Dictionary<string, IFilterHandler> BuildHandlers() =>
+        new IFilterHandler[] {
+            new SearchHandler(), new PriceHandler(), new DateHandler(),
+            new IdHandler(), new LocationHandler(db, _cache),
+            new MetaHandler(), new SimpleEqualityHandler()
+        }
+        .SelectMany(h => h.Types.Select(t => (type: t, handler: h)))
+        .ToDictionary(x => x.type, x => x.handler, StringComparer.OrdinalIgnoreCase);
 }

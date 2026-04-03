@@ -33,14 +33,18 @@ namespace AdsPortalV2.Migrations
                     b.Property<int?>("CategoryId")
                         .HasColumnType("int");
 
-                    b.Property<string>("City")
-                        .HasColumnType("nvarchar(max)");
+                    b.Property<int?>("CityId")
+                        .HasColumnType("int");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime2");
 
                     b.Property<string>("Description")
+                        .HasMaxLength(5000)
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<int?>("DistrictId")
+                        .HasColumnType("int");
 
                     b.Property<int>("FavoritesCount")
                         .HasColumnType("int");
@@ -62,10 +66,12 @@ namespace AdsPortalV2.Migrations
 
                     b.Property<string>("Title")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
 
                     b.Property<string>("Type")
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
 
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("datetime2");
@@ -79,6 +85,10 @@ namespace AdsPortalV2.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("CategoryId");
+
+                    b.HasIndex("CityId");
+
+                    b.HasIndex("DistrictId");
 
                     b.HasIndex("UserId");
 
@@ -185,6 +195,29 @@ namespace AdsPortalV2.Migrations
                         });
                 });
 
+            modelBuilder.Entity("AdsPortalV2.Entities.City", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<int>("RegionId")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RegionId");
+
+                    b.ToTable("Cities");
+                });
+
             modelBuilder.Entity("AdsPortalV2.Entities.Conversation", b =>
                 {
                     b.Property<int>("Id")
@@ -262,6 +295,29 @@ namespace AdsPortalV2.Migrations
                     b.ToTable("Conversations");
                 });
 
+            modelBuilder.Entity("AdsPortalV2.Entities.District", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("CityId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CityId");
+
+                    b.ToTable("Districts");
+                });
+
             modelBuilder.Entity("AdsPortalV2.Entities.Notification", b =>
                 {
                     b.Property<int>("Id")
@@ -297,6 +353,24 @@ namespace AdsPortalV2.Migrations
                     b.ToTable("Notifications");
                 });
 
+            modelBuilder.Entity("AdsPortalV2.Entities.Region", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("Regions");
+                });
+
             modelBuilder.Entity("AdsPortalV2.Entities.User", b =>
                 {
                     b.Property<int>("Id")
@@ -321,21 +395,25 @@ namespace AdsPortalV2.Migrations
                         .HasColumnType("datetime2");
 
                     b.Property<string>("UserEmail")
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
 
                     b.Property<string>("UserLogin")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
 
                     b.Property<string>("UserName")
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
 
                     b.Property<string>("UserPasswordHash")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("UserPhoneNumber")
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
 
                     b.HasKey("Id");
 
@@ -463,6 +541,16 @@ namespace AdsPortalV2.Migrations
                         .HasForeignKey("CategoryId")
                         .OnDelete(DeleteBehavior.Restrict);
 
+                    b.HasOne("AdsPortalV2.Entities.City", "CityRef")
+                        .WithMany()
+                        .HasForeignKey("CityId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("AdsPortalV2.Entities.District", "District")
+                        .WithMany()
+                        .HasForeignKey("DistrictId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("AdsPortalV2.Entities.User", "User")
                         .WithMany("Ads")
                         .HasForeignKey("UserId")
@@ -470,6 +558,10 @@ namespace AdsPortalV2.Migrations
                         .IsRequired();
 
                     b.Navigation("Category");
+
+                    b.Navigation("CityRef");
+
+                    b.Navigation("District");
 
                     b.Navigation("User");
                 });
@@ -505,6 +597,17 @@ namespace AdsPortalV2.Migrations
                     b.Navigation("Parent");
                 });
 
+            modelBuilder.Entity("AdsPortalV2.Entities.City", b =>
+                {
+                    b.HasOne("AdsPortalV2.Entities.Region", "Region")
+                        .WithMany("Cities")
+                        .HasForeignKey("RegionId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+
+                    b.Navigation("Region");
+                });
+
             modelBuilder.Entity("AdsPortalV2.Entities.Conversation", b =>
                 {
                     b.HasOne("AdsPortalV2.Entities.Ad", "Ad")
@@ -530,6 +633,17 @@ namespace AdsPortalV2.Migrations
                     b.Navigation("Buyer");
 
                     b.Navigation("Seller");
+                });
+
+            modelBuilder.Entity("AdsPortalV2.Entities.District", b =>
+                {
+                    b.HasOne("AdsPortalV2.Entities.City", "City")
+                        .WithMany("Districts")
+                        .HasForeignKey("CityId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+
+                    b.Navigation("City");
                 });
 
             modelBuilder.Entity("AdsPortalV2.Entities.Notification", b =>
@@ -622,6 +736,16 @@ namespace AdsPortalV2.Migrations
                     b.Navigation("Ads");
 
                     b.Navigation("Children");
+                });
+
+            modelBuilder.Entity("AdsPortalV2.Entities.City", b =>
+                {
+                    b.Navigation("Districts");
+                });
+
+            modelBuilder.Entity("AdsPortalV2.Entities.Region", b =>
+                {
+                    b.Navigation("Cities");
                 });
 
             modelBuilder.Entity("AdsPortalV2.Entities.User", b =>

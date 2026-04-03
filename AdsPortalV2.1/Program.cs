@@ -7,11 +7,17 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using System.Text.Json.Serialization;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.WebHost.ConfigureKestrel(o => o.Limits.MaxRequestBodySize = 200_000_000);
 
 builder.Services.AddMemoryCache();
+builder.Services.AddHealthChecks().AddDbContextCheck<AppDbContext>();
+builder.Services.AddResponseCompression();
+builder.Services.AddOpenApi();
 builder.Services.AddControllers()
     .AddJsonOptions(o =>
     {
@@ -53,23 +59,47 @@ builder.Services.AddAuthorization();
 builder.Services.AddCustomCors(builder.Configuration);
 
 builder.Services.AddSignalR();
+builder.Services.AddSingleton<OnlineUserTracker>();
+builder.Services.AddHostedService<PresenceCleanupService>();
 builder.Services.AddScoped<ImageService>();
 builder.Services.AddSingleton<DialogWriterService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<DialogWriterService>());
 builder.Services.AddScoped<DialogReaderService>();
 
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            ctx.Connection.RemoteIpAddress?.ToString() ?? "anon",
+            _ => new FixedWindowRateLimiterOptions { PermitLimit = 190, Window = TimeSpan.FromMinutes(1) }));
+});
+
 var app = builder.Build();
+
+app.UseMiddleware<ExceptionMiddleware>();
+app.UseResponseCompression();
 
 app.UseCors("AllowFrontend");
 
+app.UseRateLimiter();
 app.UseAuthentication();
-app.UseMiddleware<ActivityMiddleware>();
 app.UseAuthorization();
+app.UseMiddleware<ActivityMiddleware>();
 
 app.UseStaticFiles();
 
 app.MapControllers();
+app.MapOpenApi();
+app.MapHealthChecks("/health");
 app.MapHub<NotificationHub>("/hubs/notifications");
+app.MapHub<OnlineHub>("/hubs/online");
+
+await using (var scope = app.Services.CreateAsyncScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    await db.Database.MigrateAsync();
+}
 
 // Seed the database with default data
 app.SeedDatabase();
