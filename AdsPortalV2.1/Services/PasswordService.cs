@@ -1,6 +1,4 @@
-﻿using System.Security.Cryptography;
-using System.Text;
-using Microsoft.AspNetCore.Identity;
+﻿using Microsoft.AspNetCore.Identity;
 
 namespace AdsPortalV2.Services;
 
@@ -19,9 +17,6 @@ public static class PasswordService
                 return true;
         }
         catch { }
-        return hashedPassword == Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(password)));
+        return false;
     }
-
-    public static bool IsLegacyHash(string hash) =>
-        hash.Length == 64 && hash.All(c => c is (>= '0' and <= '9') or (>= 'A' and <= 'F'));
 }

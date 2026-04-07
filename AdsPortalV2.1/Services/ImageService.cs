@@ -24,7 +24,7 @@ namespace AdsPortalV2.Services
         public async Task<string> SaveCompressedImageAsync(Stream inputStream, string uploadsFolder, string fileName,
             int targetKb = 50, int minQuality = 1, int maxQuality = 100)
         {
-            if (inputStream == null) throw new ArgumentNullException(nameof(inputStream));
+            ArgumentNullException.ThrowIfNull(inputStream);
             if (string.IsNullOrEmpty(uploadsFolder)) throw new ArgumentException("Uploads folder path is required.", nameof(uploadsFolder));
             if (string.IsNullOrEmpty(fileName)) throw new ArgumentException("File name is required.", nameof(fileName));
 

@@ -6,52 +6,38 @@ using Microsoft.EntityFrameworkCore;
 namespace AdsPortalV2.Controllers;
 
 [ApiController]
+[Route("locations")]
 public class LocationsController(AppDbContext db) : ControllerBase
 {
-    [HttpGet("regions")]
-    public async Task<IActionResult> GetRegions() =>
-        Ok(await db.Regions.Select(r => new LocationRef("region", r.Id, r.Name)).ToListAsync());
-
-    [HttpGet("cities")]
-    public async Task<IActionResult> GetCities([FromQuery] int? regionId = null)
+    [HttpGet]
+    public async Task<IActionResult> GetTree()
     {
-        var query = db.Cities.AsQueryable();
-        if (regionId.HasValue) query = query.Where(c => c.RegionId == regionId.Value);
-        return Ok(await query.Select(c => new LocationRef("city", c.Id, c.Name)).ToListAsync());
-    }
-
-    [HttpGet("districts")]
-    public async Task<IActionResult> GetDistricts([FromQuery] int? cityId = null)
-    {
-        var query = db.Districts.AsQueryable();
-        if (cityId.HasValue) query = query.Where(d => d.CityId == cityId.Value);
-        return Ok(await query.Select(d => new LocationRef("district", d.Id, d.Name)).ToListAsync());
-    }
-
-    [HttpGet("locations/search")]
-    public async Task<IActionResult> Search([FromQuery] string? q)
-    {
-        if (string.IsNullOrWhiteSpace(q)) return Ok(Array.Empty<object>());
-
-        var term = $"%{q.Trim()}%";
-        const int limit = 12;
-
-        var result = await db.Cities
-            .Where(x => EF.Functions.Like(x.Name, term))
-            .Select(x => new { Sort = 0, Type = "city", x.Id, x.Name })
-            .Concat(db.Regions
-                .Where(x => EF.Functions.Like(x.Name, term))
-                .Select(x => new { Sort = 1, Type = "region", x.Id, x.Name }))
-            .Concat(db.Districts
-                .Where(x => EF.Functions.Like(x.Name, term))
-                .Select(x => new { Sort = 2, Type = "district", x.Id, x.Name }))
-            .OrderBy(x => x.Sort)
-            .ThenBy(x => x.Name)
-            .Take(limit)
-            .Select(x => new LocationRef(x.Type, x.Id, x.Name))
+        var items = await db.Locations
+            .AsNoTracking()
+            .OrderBy(l => l.Type)
+            .ThenBy(l => l.Name)
             .ToListAsync();
 
-        return Ok(result);
+        var nodes = items.ToDictionary(
+            x => x.Id,
+            x => new LocationTreeNodeDto
+            {
+                Id = x.Id,
+                Name = x.Name,
+                Type = x.Type
+            });
+
+        List<LocationTreeNodeDto> roots = [];
+        foreach (var item in items)
+        {
+            var node = nodes[item.Id];
+            if (item.ParentId is int parentId && nodes.TryGetValue(parentId, out var parent))
+                parent.Children.Add(node);
+            else
+                roots.Add(node);
+        }
+
+        return Ok(roots);
     }
 }
 

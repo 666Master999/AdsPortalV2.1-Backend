@@ -16,25 +16,26 @@ public class Ad
     public decimal? Price { get; set; }
 
     [MaxLength(50)]
-    public string? Type { get; set; }
+    public string? ListingType { get; set; }
     public bool IsNegotiable { get; set; }
 
-    public int? CityId { get; set; }
-    public int? DistrictId { get; set; }
-    public City? CityRef { get; set; }
-    public District? District { get; set; }
+    public int LocationId { get; set; }
+    public Location? Location { get; set; }
+    public int? MainImageId { get; set; }
+    public AdImage? MainImage { get; set; }
 
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 
-    public bool IsDeleted { get; set; }
-    public ModerationStatus ModerationStatus { get; set; }
+    public AdStatus Status { get; set; } = AdStatus.PendingModeration;
+    public string? RejectionReason { get; set; }
+    public DateTime? DeletedAt { get; set; }
 
     public int ViewsCount { get; set; }
     public int FavoritesCount { get; set; }
 
     public Category? Category { get; set; }
     public User? User { get; set; }
-    public ICollection<AdImage> Images { get; set; } = new List<AdImage>();
-    public ICollection<Conversation> Conversations { get; set; } = new List<Conversation>();
+    public ICollection<AdImage> Images { get; set; } = [];
+    public ICollection<Conversation> Conversations { get; set; } = [];
 }

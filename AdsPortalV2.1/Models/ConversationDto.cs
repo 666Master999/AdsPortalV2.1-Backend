@@ -24,7 +24,7 @@ public sealed record ConversationAdDto(
     int Id,
     string Title,
     string? Image,
-    string? ModerationStatus);
+    AdStatus Status);
 
 public sealed record ConversationLastMessageDto(
     int? Id,
@@ -56,8 +56,8 @@ public static class ConversationDtoBuilder
             new ConversationAdDto(
                 conversation.Ad.Id,
                 conversation.Ad.Title,
-                conversation.Ad.Images.FirstOrDefault(img => img.IsMain)?.FilePath,
-                conversation.Ad.ModerationStatus.ToString()),
+                conversation.Ad.Images.FirstOrDefault(img => img.Id == conversation.Ad.MainImageId)?.FilePath,
+                conversation.Ad.Status),
             lastMessage,
             unreadCount,
             firstUnreadMessageId,

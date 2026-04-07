@@ -1,102 +1,187 @@
-using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
-using System.Text;
 using AdsPortalV2.Data;
 using AdsPortalV2.Entities;
+using AdsPortalV2.Models;
 using AdsPortalV2.Services;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.IdentityModel.Tokens;
 
 namespace AdsPortalV2.Controllers;
 
 [ApiController]
 [Route("auth")]
-public class AuthController(AppDbContext db, IConfiguration config, ILogger<AuthController> logger) : ControllerBase
+public class AuthController(AppDbContext db, ITokenService tokens, PermissionService perms, ILogger<AuthController> logger) : ControllerBase
 {
-    private readonly SymmetricSecurityKey _key = new(Encoding.UTF8.GetBytes(config["Jwt:Key"]!));
+    private static readonly TimeSpan RefreshTokenLifetime = TimeSpan.FromDays(30);
 
     [HttpPost("register")]
-    public async Task<IActionResult> Register([FromBody] RegisterRequest request)
+    public async Task<IActionResult> Register([FromBody] RegisterRequest req)
     {
-        if (string.IsNullOrWhiteSpace(request.UserLogin))
-            return BadRequest(new ApiResponse { Success = false, Message = "Login cannot be empty" });
+        if (string.IsNullOrWhiteSpace(req.UserLogin) || string.IsNullOrWhiteSpace(req.UserPassword))
+            return BadRequest(new ApiError("validation_error", "Login and password are required"));
 
-        if (string.IsNullOrWhiteSpace(request.UserPassword))
-            return BadRequest(new ApiResponse { Success = false, Message = "Password cannot be empty" });
-
-        if (await db.Users.AnyAsync(u => u.UserLogin == request.UserLogin))
-            return BadRequest(new ApiResponse { Success = false, Message = "Login already registered" });
+        if (await db.Users.AnyAsync(u => u.UserLogin == req.UserLogin))
+            return BadRequest(new ApiError("validation_error", "Login already registered"));
 
         var user = new User
         {
-            UserLogin = request.UserLogin,
-            UserPasswordHash = PasswordService.Hash(request.UserPassword)
+            UserLogin = req.UserLogin,
+            UserPasswordHash = PasswordService.Hash(req.UserPassword)
         };
 
         db.Users.Add(user);
         await db.SaveChangesAsync();
 
         logger.LogInformation("User registered: {Login} (id={Id})", user.UserLogin, user.Id);
-        return Ok(AuthSuccess(user));
+        return Ok(await CreateSessionAsync(user));
     }
 
     [HttpPost("login")]
-    public async Task<IActionResult> Login([FromBody] LoginRequest request)
+    public async Task<IActionResult> Login([FromBody] LoginRequest req)
     {
-        var user = await db.Users.FirstOrDefaultAsync(u => u.UserLogin == request.UserLogin);
-        if (user == null || !PasswordService.Verify(user.UserPasswordHash, request.UserPassword))
+        var user = await db.Users.FirstOrDefaultAsync(u => u.UserLogin == req.UserLogin);
+        if (user == null || !PasswordService.Verify(user.UserPasswordHash, req.UserPassword))
         {
-            logger.LogWarning("Failed login attempt for: {Login}", request.UserLogin);
-            return Unauthorized(new ApiResponse { Success = false, Message = "Invalid login or password" });
+            logger.LogWarning("Failed login: {Login}", req.UserLogin);
+            return Unauthorized(new ApiError("validation_error", "Invalid login or password"));
         }
 
-        if (PasswordService.IsLegacyHash(user.UserPasswordHash))
+        if (await perms.HasActiveRestrictionAsync(user.Id, RestrictionType.LoginBan))
+            return StatusCode(403, new ApiError("forbidden", "Account is banned"));
+
+        logger.LogInformation("User logged in: {Login} (id={Id})", user.UserLogin, user.Id);
+        return Ok(await CreateSessionAsync(user));
+    }
+
+    [HttpPost("refresh")]
+    public async Task<IActionResult> Refresh([FromBody] RefreshRequest req)
+    {
+        var hash = tokens.HashToken(req.RefreshToken);
+        var session = await db.AuthSessions
+            .Include(s => s.User)
+            .FirstOrDefaultAsync(s => s.RefreshTokenHash == hash);
+
+        if (session == null || session.IsRevoked || session.ExpiresAt < DateTime.UtcNow)
+            return Unauthorized(new ApiError("validation_error", "Invalid or expired refresh token"));
+
+        if (await perms.HasActiveRestrictionAsync(session.User.Id, RestrictionType.LoginBan))
+            return StatusCode(403, new ApiError("forbidden", "Account is banned"));
+
+        var newRefresh = tokens.GenerateRefreshToken();
+        session.RefreshTokenHash = tokens.HashToken(newRefresh);
+        session.LastActivityAt = DateTime.UtcNow;
+        await db.SaveChangesAsync();
+
+        return Ok(new AuthRefreshResponseDto(tokens.GenerateAccessToken(session.User, session), newRefresh));
+    }
+
+    [Authorize]
+    [HttpPost("logout")]
+    public async Task<IActionResult> Logout()
+    {
+        if (!User.TryGetSessionId(out var sessionId))
+            return Unauthorized();
+
+        var session = await db.AuthSessions.FindAsync(sessionId);
+        if (session != null)
         {
-            user.UserPasswordHash = PasswordService.Hash(request.UserPassword);
+            session.IsRevoked = true;
+            session.RevokedAt = DateTime.UtcNow;
             await db.SaveChangesAsync();
         }
 
-        logger.LogInformation("User logged in: {Login} (id={Id})", user.UserLogin, user.Id);
-        return Ok(AuthSuccess(user));
+        return Ok();
     }
 
-    [HttpPost("logout")]
-    public IActionResult Logout() => Ok(new ApiResponse { Success = true, Message = "Logged out successfully" });
-
-    private ApiResponse<object> AuthSuccess(User user) => new()
+    [Authorize]
+    [HttpPost("logout-all")]
+    public async Task<IActionResult> LogoutAll()
     {
-        Success = true,
-        Message = "Authentication successful",
-        Data = new
+        if (!User.TryGetUserId(out var userId))
+            return Unauthorized();
+
+        var now = DateTime.UtcNow;
+        await db.AuthSessions
+            .Where(s => s.UserId == userId && !s.IsRevoked)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(x => x.IsRevoked, true)
+                .SetProperty(x => x.RevokedAt, now));
+
+        await db.Users
+            .Where(u => u.Id == userId)
+            .ExecuteUpdateAsync(s => s.SetProperty(u => u.TokenVersion, u => u.TokenVersion + 1));
+
+        return Ok();
+    }
+
+    [Authorize]
+    [HttpGet("sessions")]
+    public async Task<IActionResult> GetSessions()
+    {
+        if (!User.TryGetUserId(out var userId) || !User.TryGetSessionId(out var currentSessionId))
+            return Unauthorized();
+
+        var sessions = await db.AuthSessions
+            .AsNoTracking()
+            .Where(s => s.UserId == userId && !s.IsRevoked && s.ExpiresAt > DateTime.UtcNow)
+            .OrderByDescending(s => s.LastActivityAt)
+            .Select(s => new AuthSessionDto(s.Id, s.DeviceName, s.IpAddress, s.LastActivityAt, s.CreatedAt, s.Id == currentSessionId))
+            .ToListAsync();
+
+        return Ok(sessions);
+    }
+
+    [Authorize]
+    [HttpDelete("sessions/{id:guid}")]
+    public async Task<IActionResult> RevokeSession(Guid id)
+    {
+        if (!User.TryGetUserId(out var userId))
+            return Unauthorized();
+
+        var session = await db.AuthSessions.FirstOrDefaultAsync(s => s.Id == id && s.UserId == userId);
+        if (session == null)
+            return NotFound();
+
+        session.IsRevoked = true;
+        session.RevokedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync();
+
+        return Ok();
+    }
+
+    [Authorize]
+    [HttpGet("/me/restrictions")]
+    public async Task<IActionResult> GetMyRestrictions()
+    {
+        if (!User.TryGetUserId(out var userId)) return Unauthorized();
+        var ctx = await perms.GetUserContextAsync(userId);
+        return Ok(ctx.Restrictions.Select(r => new MeRestrictionDto(r.Type.ToString(), r.ExpiresAt, r.Reason)).ToList());
+    }
+
+    private async Task<AuthSessionResponseDto> CreateSessionAsync(User user)
+    {
+        var refreshToken = tokens.GenerateRefreshToken();
+        var userAgent = Request.Headers.UserAgent.ToString();
+
+        var session = new UserSession
         {
-            token = GenerateToken(user),
-            userId = user.Id,
-            userLogin = user.UserLogin,
-            userName = user.UserName,
-            avatar = user.AvatarPath
-        }
-    };
+            UserId = user.Id,
+            RefreshTokenHash = tokens.HashToken(refreshToken),
+            DeviceName = string.IsNullOrEmpty(userAgent) ? null : userAgent[..Math.Min(userAgent.Length, 200)],
+            IpAddress = HttpContext.Connection.RemoteIpAddress?.ToString(),
+            UserAgent = string.IsNullOrEmpty(userAgent) ? null : userAgent[..Math.Min(userAgent.Length, 512)],
+            ExpiresAt = DateTime.UtcNow.Add(RefreshTokenLifetime)
+        };
 
-    private string GenerateToken(User user)
-    {
-        var credentials = new SigningCredentials(_key, SecurityAlgorithms.HmacSha256);
+        db.AuthSessions.Add(session);
+        await db.SaveChangesAsync();
 
-
-        var token = new JwtSecurityToken(
-            issuer: config["Jwt:Issuer"],
-            audience: config["Jwt:Audience"],
-            claims: [
-                new Claim("id", user.Id.ToString()),
-                new Claim(ClaimTypes.Name, user.UserLogin),
-                new Claim("isAdmin", user.IsAdmin.ToString())
-            ],
-            expires: DateTime.UtcNow.AddHours(24),
-            signingCredentials: credentials);
-
-        return new JwtSecurityTokenHandler().WriteToken(token);
+        return new AuthSessionResponseDto(tokens.GenerateAccessToken(user, session), refreshToken, user.Id, user.UserLogin, user.UserName, user.AvatarPath);
     }
 }
 
 public record RegisterRequest(string UserLogin, string UserPassword);
 public record LoginRequest(string UserLogin, string UserPassword);
+public record RefreshRequest(string RefreshToken);
+

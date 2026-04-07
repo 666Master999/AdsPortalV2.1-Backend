@@ -1,4 +1,5 @@
 using AdsPortalV2.Data;
+using AdsPortalV2.Controllers;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using System.Security.Claims;
@@ -11,19 +12,23 @@ public class ActivityMiddleware(RequestDelegate next, IMemoryCache cache)
 
     public async Task InvokeAsync(HttpContext context, AppDbContext db)
     {
-        if (context.User.Identity?.IsAuthenticated == true)
+        if (context.User.Identity?.IsAuthenticated == true && context.User.TryGetUserId(out var userId))
         {
-            var idValue = context.User.FindFirstValue("id");
-            if (int.TryParse(idValue, out var userId))
+            var key = $"activity:{userId}";
+            if (!cache.TryGetValue(key, out _))
             {
-                var key = $"activity:{userId}";
-                if (!cache.TryGetValue(key, out _))
-                {
-                    cache.Set(key, true, Interval);
-                    await db.Users
-                        .Where(u => u.Id == userId)
-                        .ExecuteUpdateAsync(s => s.SetProperty(u => u.LastActivityAt, DateTime.UtcNow));
-                }
+                cache.Set(key, true, Interval);
+                var now = DateTime.UtcNow;
+
+                await db.Users
+                    .Where(u => u.Id == userId)
+                    .ExecuteUpdateAsync(s => s.SetProperty(u => u.LastActivityAt, now));
+
+                var sidValue = context.User.FindFirstValue("sid");
+                if (Guid.TryParse(sidValue, out var sessionId))
+                    await db.AuthSessions
+                        .Where(s => s.Id == sessionId)
+                        .ExecuteUpdateAsync(s => s.SetProperty(x => x.LastActivityAt, now));
             }
         }
 

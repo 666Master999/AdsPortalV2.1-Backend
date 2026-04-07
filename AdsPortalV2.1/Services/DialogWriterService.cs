@@ -15,7 +15,7 @@ namespace AdsPortalV2.Services;
 public class DialogWriterService(IServiceScopeFactory scopeFactory, IWebHostEnvironment env, IHubContext<NotificationHub> hub, IHubContext<OnlineHub> onlineHub) : IHostedService
 {
     private readonly Channel<WriteCommand> _channel = Channel.CreateUnbounded<WriteCommand>();
-    private readonly Dictionary<int, int> _activeFileIndexes = new();
+    private readonly Dictionary<int, int> _activeFileIndexes = [];
     // LRU: max 4000 metadata entries (unread + dialog meta), max 1000 message caches
     private readonly MemoryCache _metaCache = new(new MemoryCacheOptions { SizeLimit = 4_000 });
     private readonly MemoryCache _msgCache = new(new MemoryCacheOptions { SizeLimit = 1_000 });
@@ -75,16 +75,17 @@ public class DialogWriterService(IServiceScopeFactory scopeFactory, IWebHostEnvi
         conv.HasUnreadForBuyer = dialogMeta != null && (await GetUnreadStateAsync(folder, dialogMeta, unreadMeta.BuyerLastSeenMessageId ?? 0, conv.BuyerId)).Count > 0;
         await db.SaveChangesAsync();
 
+        object[] participants = [
+            new { Id = conv.SellerId, LastReadMessageId = unreadMeta.SellerLastSeenMessageId },
+            new { Id = conv.BuyerId, LastReadMessageId = unreadMeta.BuyerLastSeenMessageId }
+        ];
+
         await onlineHub.Clients.Group($"conversation:{conversationId}").SendAsync("chat:read", new
         {
             conversationId,
             userId,
             lastSeenMessageId,
-            participants = new[]
-            {
-                new { Id = conv.SellerId, LastReadMessageId = unreadMeta.SellerLastSeenMessageId },
-                new { Id = conv.BuyerId, LastReadMessageId = unreadMeta.BuyerLastSeenMessageId }
-            }
+            participants
         });
 
         // Notify the sender explicitly
@@ -122,7 +123,7 @@ public class DialogWriterService(IServiceScopeFactory scopeFactory, IWebHostEnvi
         return userId == conv.SellerId ? meta.SellerLastSeenMessageId : meta.BuyerLastSeenMessageId;
     }
 
-    private async Task<(int Count, int? FirstUnreadMessageId)> GetUnreadStateAsync(string folder, DialogMeta dialogMeta, int lastSeenMessageId, int userId)
+    private static async Task<(int Count, int? FirstUnreadMessageId)> GetUnreadStateAsync(string folder, DialogMeta dialogMeta, int lastSeenMessageId, int userId)
     {
         if (dialogMeta.LastMessageId <= lastSeenMessageId) return (0, null);
 
@@ -241,7 +242,7 @@ public class DialogWriterService(IServiceScopeFactory scopeFactory, IWebHostEnvi
         _metaCache.Set($"d:{folder}", dialogMeta, MetaOpts);
 
         // популяция message cache (cache-first для since)
-        var list = _msgCache.GetOrCreate(conv.Id, e => { e.SetOptions(MsgOpts); return ImmutableList<ChatMessage>.Empty; }) ?? ImmutableList<ChatMessage>.Empty;
+        var list = _msgCache.GetOrCreate(conv.Id, e => { e.SetOptions(MsgOpts); return ImmutableList<ChatMessage>.Empty; }) ?? [];
         list = list.Count >= MaxCachedMessages ? list.RemoveAt(0).Add(message) : list.Add(message);
         _msgCache.Set(conv.Id, list, MsgOpts);
 
@@ -297,10 +298,10 @@ public class DialogWriterService(IServiceScopeFactory scopeFactory, IWebHostEnvi
             .Include(c => c.Buyer)
             .FirstAsync();
 
-        var sellerUnread = await GetUnreadStateAsync(fullConversation, fullConversation.SellerId);
+        var (Count, FirstUnreadMessageId) = await GetUnreadStateAsync(fullConversation, fullConversation.SellerId);
         var buyerUnread = await GetUnreadStateAsync(fullConversation, fullConversation.BuyerId);
 
-        var sellerDto = fullConversation.ToDto(fullConversation.SellerId, sellerUnread.Count, sellerUnread.FirstUnreadMessageId, message.Id);
+        var sellerDto = fullConversation.ToDto(fullConversation.SellerId, Count, FirstUnreadMessageId, message.Id);
         var buyerDto = fullConversation.ToDto(fullConversation.BuyerId, buyerUnread.Count, buyerUnread.FirstUnreadMessageId, message.Id);
 
         await hub.Clients.Group($"user:{conv.SellerId}").SendAsync("chat:conversationUpdated", sellerDto);
@@ -412,7 +413,7 @@ public class DialogWriterService(IServiceScopeFactory scopeFactory, IWebHostEnvi
         return (list.Where(m => m.Id >= fromMessageId).ToList(), false);
     }
 
-    private async Task<ChatMessage?> FindLastNonDeletedMessageAsync(string folder, DialogMeta meta)
+    private static async Task<ChatMessage?> FindLastNonDeletedMessageAsync(string folder, DialogMeta meta)
     {
         for (var i = meta.LastFileIndex; i >= 0; i--)
         {

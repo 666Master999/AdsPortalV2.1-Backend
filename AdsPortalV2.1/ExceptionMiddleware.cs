@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using AdsPortalV2.Models;
 
 namespace AdsPortalV2;
 
@@ -22,14 +23,15 @@ public class ExceptionMiddleware(RequestDelegate next, ILogger<ExceptionMiddlewa
         {
             await next(context);
 
-            if (context.Response.StatusCode >= 400 && context.Response.StatusCode < 500)
+            if (context.Response.StatusCode >= 400 && context.Response.StatusCode < 500 && logger.IsEnabled(LogLevel.Warning))
                 logger.LogWarning("[{CId}] HTTP {Status} {Method} {Path}",
                     correlationId, context.Response.StatusCode, context.Request.Method, context.Request.Path);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "[{CId}] Unhandled exception on {Method} {Path}",
-                correlationId, context.Request.Method, context.Request.Path);
+            if (logger.IsEnabled(LogLevel.Error))
+                logger.LogError(ex, "[{CId}] Unhandled exception on {Method} {Path}",
+                    correlationId, context.Request.Method, context.Request.Path);
 
             context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
             context.Response.ContentType = "application/json";

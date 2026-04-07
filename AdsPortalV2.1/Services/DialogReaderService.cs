@@ -101,7 +101,7 @@ public class DialogReaderService(IWebHostEnvironment env)
         return messages;
     }
 
-    private async Task<DialogMeta?> LoadDialogMetaAsync(string folder)
+    private static async Task<DialogMeta?> LoadDialogMetaAsync(string folder)
     {
         var path = Path.Combine(folder, "dialog.meta.json");
         if (!File.Exists(path)) return null;

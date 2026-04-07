@@ -7,11 +7,12 @@ using Microsoft.EntityFrameworkCore;
 using System.Collections.Concurrent;
 using System.Threading;
 using System.Threading.Tasks;
+using AdsPortalV2.Entities;
 
 namespace AdsPortalV2.Hubs;
 
 [Authorize]
-public class OnlineHub(OnlineUserTracker tracker, IServiceScopeFactory scopeFactory) : Hub
+public class OnlineHub(OnlineUserTracker tracker, IServiceScopeFactory scopeFactory, PermissionService perms) : Hub
 {
     private static string ConversationGroup(int conversationId) => $"conversation:{conversationId}";
     private static readonly ConcurrentDictionary<int, CancellationTokenSource> _pendingOfflineDebounce = new();
@@ -127,6 +128,7 @@ public class OnlineHub(OnlineUserTracker tracker, IServiceScopeFactory scopeFact
     public async Task JoinGroup(int conversationId)
     {
         if (Context.User?.TryGetUserId(out var userId) != true) return;
+        if (await perms.HasActiveRestrictionAsync(userId, RestrictionType.ChatBan)) return;
         if (!await IsConversationParticipantAsync(conversationId, userId)) return;
         await Groups.AddToGroupAsync(Context.ConnectionId, ConversationGroup(conversationId));
     }
@@ -164,7 +166,7 @@ public class OnlineHub(OnlineUserTracker tracker, IServiceScopeFactory scopeFact
             .Select(c => new
             {
                 conversationId,
-                userId = userId,
+                userId,
                 userName = c.SellerId == userId
                     ? c.Seller.UserName ?? c.Seller.UserLogin
                     : c.Buyer.UserName ?? c.Buyer.UserLogin
@@ -197,8 +199,8 @@ public class OnlineHub(OnlineUserTracker tracker, IServiceScopeFactory scopeFact
 
         var participants = new[] { (conv.Seller.Id, conv.Seller.Name), (conv.Buyer.Id, conv.Buyer.Name) };
         var users = participants
-            .Where(p => tracker.IsOnline(p.Item1))
-            .Select(p => new { userId = p.Item1, userName = p.Item2 })
+            .Where(p => tracker.IsOnline(p.Id))
+            .Select(p => new { userId = p.Id, userName = p.Name })
             .ToArray();
 
         var payload = new { conversationId = conv.Id, users };

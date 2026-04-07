@@ -12,5 +12,5 @@ public class City
     public int RegionId { get; set; }
     public Region? Region { get; set; }
 
-    public ICollection<District> Districts { get; set; } = new List<District>();
+    public ICollection<District> Districts { get; set; } = [];
 }

@@ -47,7 +47,7 @@ public class PresenceCleanupService(
 
                     if (conv == null) continue;
 
-                    var users = new[] { (Id: conv.Seller.Id, Name: conv.Seller.Name), (Id: conv.Buyer.Id, Name: conv.Buyer.Name) }
+                    var users = new[] { (conv.Seller.Id, conv.Seller.Name), (conv.Buyer.Id, conv.Buyer.Name) }
                         .Where(p => tracker.IsOnline(p.Id))
                         .Select(p => new { userId = p.Id, userName = p.Name })
                         .ToArray();

@@ -9,5 +9,5 @@ public class Region
     [MaxLength(100)]
     public string Name { get; set; } = string.Empty;
 
-    public ICollection<City> Cities { get; set; } = new List<City>();
+    public ICollection<City> Cities { get; set; } = [];
 }

@@ -90,6 +90,6 @@ public class OnlineUserTracker
             if (isNowOffline) offlineUsers.Add(userId);
         }
 
-        return offlineUsers.Distinct().ToList();
+        return [.. offlineUsers.Distinct()];
     }
 }

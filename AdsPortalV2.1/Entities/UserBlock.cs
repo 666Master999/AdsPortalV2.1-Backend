@@ -3,10 +3,10 @@ namespace AdsPortalV2.Entities;
 public class UserBlock
 {
     public int Id { get; set; }
-    public int UserId { get; set; }
-    public string Reason { get; set; } = "";
-    public DateTime BlockedAt { get; set; } = DateTime.UtcNow;
-    public DateTime? UnblockedAt { get; set; }
+    public int SourceUserId { get; set; }
+    public int TargetUserId { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
-    public User User { get; set; } = null!;
+    public User SourceUser { get; set; } = null!;
+    public User TargetUser { get; set; } = null!;
 }

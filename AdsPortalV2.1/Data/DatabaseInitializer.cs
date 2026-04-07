@@ -1,7 +1,8 @@
-using AdsPortalV2.Data;
 using AdsPortalV2.Entities;
 using AdsPortalV2.Services;
 using Microsoft.EntityFrameworkCore;
+
+namespace AdsPortalV2.Data;
 
 public static class DatabaseInitializer
 {
@@ -11,27 +12,44 @@ public static class DatabaseInitializer
         var context = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var config = scope.ServiceProvider.GetRequiredService<IConfiguration>();
 
+        // For development: recreate database to ensure clean schema matching current model.
         try
         {
-            if (context.Database.GetPendingMigrations().Any())
-                context.Database.Migrate();
+            context.Database.EnsureDeleted();
+            context.Database.Migrate();
         }
         catch
         {
-            // Игнорируем ошибки миграции при несовпадении модели в рантайме (dev).
+            // best-effort: ignore migration errors in dev
         }
+
+        // Ensure any legacy string values are migrated from "CommentBan" to "ChatBan" in DB
+        try
+        {
+            context.Database.ExecuteSqlRaw("UPDATE UserRestrictions SET Type = 'ChatBan' WHERE Type = 'CommentBan'");
+        }
+        catch { /* best-effort, ignore if table missing or SQL fails in dev */ }
 
         if (!context.Users.Any(u => u.UserLogin == "admin"))
         {
             var password = config["Admin:DefaultPassword"] ?? "admin123";
 
-            context.Users.Add(new User
+            var adminUser = new User
             {
                 UserLogin = "admin",
-                UserPasswordHash = PasswordService.Hash(password),
-                IsAdmin = true
-            });
+                UserPasswordHash = PasswordService.Hash(password)
+            };
+
+            context.Users.Add(adminUser);
             context.SaveChanges();
+
+            // Seed RBAC
+            SeedRbac(context, adminUser.Id);
+        }
+        else if (!context.Roles.Any())
+        {
+            var adminUser = context.Users.First(u => u.UserLogin == "admin");
+            SeedRbac(context, adminUser.Id);
         }
 
         if (!context.Categories.Any())
@@ -48,54 +66,91 @@ public static class DatabaseInitializer
         SeedLocations(context);
     }
 
+    private static void SeedRbac(AppDbContext context, int adminUserId)
+    {
+        if (context.Roles.Any()) return;
+
+        Role[] roles = [
+            new Role { Name = "User" },
+            new Role { Name = "Moderator" },
+            new Role { Name = "Admin" },
+            new Role { Name = "SuperAdmin" }
+        ];
+        context.Roles.AddRange(roles);
+        context.SaveChanges();
+
+        string[] permNames = [
+            "ads.view", "ads.view_hidden", "ads.create", "ads.edit", "ads.delete", "ads.moderate",
+            "users.ban", "users.unban", "users.edit",
+            "roles.assign", "roles.revoke",
+            "logs.view"
+        ];
+        var perms = permNames.Select(n => new Permission { Name = n }).ToArray();
+        context.Permissions.AddRange(perms);
+        context.SaveChanges();
+
+        var permMap = perms.ToDictionary(p => p.Name, p => p.Id);
+        var roleMap = roles.ToDictionary(r => r.Name, r => r.Id);
+
+        void Assign(string role, params string[] pms)
+        {
+            foreach (var p in pms)
+                context.RolePermissions.Add(new RolePermission { RoleId = roleMap[role], PermissionId = permMap[p] });
+        }
+
+        Assign("User", "ads.view", "ads.create", "ads.edit", "ads.delete");
+        Assign("Moderator", "ads.view", "ads.view_hidden", "ads.moderate", "users.ban");
+        Assign("Admin", "ads.view", "ads.view_hidden", "users.unban", "users.edit", "logs.view");
+        Assign("SuperAdmin", "ads.view", "ads.view_hidden", "ads.create", "ads.edit", "ads.delete",
+            "ads.moderate", "users.ban", "users.unban", "users.edit", "roles.assign", "roles.revoke", "logs.view");
+
+        context.SaveChanges();
+
+        context.UserRoles.Add(new UserRole { UserId = adminUserId, RoleId = roleMap["SuperAdmin"] });
+        context.SaveChanges();
+    }
+
     private static void SeedLocations(AppDbContext context)
     {
-        static string Key(int id, string name) => $"{id}:{name}".ToLowerInvariant();
+        if (context.Locations.Any()) return;
 
-        var regions = context.Regions.ToDictionary(x => x.Name, StringComparer.OrdinalIgnoreCase);
-        var missingRegions = BelarusGeoSeed.Regions
-            .Where(name => !regions.ContainsKey(name))
-            .Select(name => new Region { Name = name })
-            .ToList();
+        var locations = new List<Location>();
 
-        if (missingRegions.Count > 0)
+        foreach (var regionName in BelarusGeoSeed.Regions)
+            locations.Add(new Location { Name = regionName, Type = LocationType.Region });
+
+        context.Locations.AddRange(locations);
+        context.SaveChanges();
+
+        var regionIds = context.Locations
+            .Where(x => x.Type == LocationType.Region)
+            .ToDictionary(x => x.Name, x => x.Id, StringComparer.OrdinalIgnoreCase);
+
+        var cityLocations = new List<Location>();
+        foreach (var region in BelarusGeoSeed.Cities)
         {
-            context.Regions.AddRange(missingRegions);
-            context.SaveChanges();
-            regions = context.Regions.ToDictionary(x => x.Name, StringComparer.OrdinalIgnoreCase);
+            if (!regionIds.TryGetValue(region.Region, out var regionId)) continue;
+
+            foreach (var cityName in region.Cities)
+                cityLocations.Add(new Location { Name = cityName, Type = LocationType.City, ParentId = regionId });
         }
 
-        var cities = context.Cities
-            .Select(x => new { x.Id, x.Name, x.RegionId })
-            .ToList()
-            .ToDictionary(x => Key(x.RegionId, x.Name), x => x.Id);
+        context.Locations.AddRange(cityLocations);
+        context.SaveChanges();
 
-        var missingCities = BelarusGeoSeed.Cities
-            .SelectMany(x => x.Cities.Select(name => new City { Name = name, RegionId = regions[x.Region].Id }))
-            .Where(x => !cities.ContainsKey(Key(x.RegionId, x.Name)))
-            .ToList();
-
-        if (missingCities.Count > 0)
+        var districtLocations = new List<Location>();
+        foreach (var city in BelarusGeoSeed.Districts)
         {
-            context.Cities.AddRange(missingCities);
-            context.SaveChanges();
+            var cityEntry = context.Locations.FirstOrDefault(x => x.Type == LocationType.City && x.Name == city.City);
+            if (cityEntry == null) continue;
+
+            foreach (var districtName in city.Districts)
+                districtLocations.Add(new Location { Name = districtName, Type = LocationType.District, ParentId = cityEntry.Id });
         }
 
-        var cityMap = context.Cities.ToDictionary(x => x.Name, StringComparer.OrdinalIgnoreCase);
-        var districts = context.Districts
-            .Select(x => new { x.Name, x.CityId })
-            .ToList()
-            .ToDictionary(x => Key(x.CityId, x.Name), x => x.CityId);
-
-        var missingDistricts = BelarusGeoSeed.Districts
-            .Where(x => cityMap.ContainsKey(x.City))
-            .SelectMany(x => x.Districts.Select(name => new District { Name = name, CityId = cityMap[x.City].Id }))
-            .Where(x => !districts.ContainsKey(Key(x.CityId, x.Name)))
-            .ToList();
-
-        if (missingDistricts.Count > 0)
+        if (districtLocations.Count > 0)
         {
-            context.Districts.AddRange(missingDistricts);
+            context.Locations.AddRange(districtLocations);
             context.SaveChanges();
         }
     }

@@ -6,7 +6,6 @@ public class AdImage
     public int AdId { get; set; }
     public string FilePath { get; set; } = "";
     public int SortOrder { get; set; }
-    public bool IsMain { get; set; }  
 
     public Ad Ad { get; set; } = null!;
 }
