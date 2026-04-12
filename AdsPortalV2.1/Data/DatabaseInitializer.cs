@@ -1,6 +1,7 @@
 using AdsPortalV2.Entities;
 using AdsPortalV2.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Hosting;
 
 namespace AdsPortalV2.Data;
 
@@ -12,15 +13,23 @@ public static class DatabaseInitializer
         var context = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var config = scope.ServiceProvider.GetRequiredService<IConfiguration>();
 
-        // For development: recreate database to ensure clean schema matching current model.
+        // Database recreation is dangerous in non-development environments.
+        // Control behavior with configuration: "Database:Recreate" = true to drop+migrate on startup.
+        // Default: do not drop database.
+        var env = scope.ServiceProvider.GetRequiredService<IWebHostEnvironment>();
         try
         {
-            context.Database.EnsureDeleted();
+            var recreate = config.GetValue<bool>("Database:Recreate", false);
+            if (recreate && env.IsDevelopment())
+            {
+                //context.Database.EnsureDeleted(); Зачем мы удаляем базу данных при каждом запуске в деве? Это жесть, можно случайно удалить важные данные. Лучше просто мигрировать, а если нужно чисто для тестов - юзать InMemory или SQLite в памяти.
+            }
+
             context.Database.Migrate();
         }
-        catch
+        catch (Exception ex)
         {
-            // best-effort: ignore migration errors in dev
+            Console.WriteLine($"Migration error: {ex}");
         }
 
         // Ensure any legacy string values are migrated from "CommentBan" to "ChatBan" in DB

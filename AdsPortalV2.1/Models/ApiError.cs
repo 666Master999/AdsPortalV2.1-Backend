@@ -10,24 +10,25 @@ public sealed class ApiError
     [JsonPropertyName("message")]
     public string Message { get; }
 
-    [JsonPropertyName("fields")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public IReadOnlyDictionary<string, string>? Fields { get; }
-
     [JsonPropertyName("details")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public object? Details { get; }
+
+    [JsonPropertyName("issues")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyCollection<PatchIssueDto>? Issues { get; }
 
     public ApiError(string code, string message)
     {
         Code = code;
         Message = message;
+        Issues = [new PatchIssueDto(code, null, message)];
     }
-
-    public ApiError(string code, string message, IReadOnlyDictionary<string, string> fields)
-        : this(code, message)
+    public ApiError(string code, string message, IReadOnlyCollection<PatchIssueDto> issues)
     {
-        Fields = fields;
+        Code = code;
+        Message = message;
+        Issues = issues;
     }
 
     public ApiError(string code, string message, object details)

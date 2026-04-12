@@ -11,6 +11,15 @@ public static class FilePathValidator
             return false;
 
         var normalized = input.Trim().Replace('\\', '/');
+
+        // Reject absolute URLs explicitly
+        if (normalized.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || normalized.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        // Allow paths that start with a leading slash (public URL style) by trimming the leading '/'
+        if (normalized.StartsWith('/'))
+            normalized = normalized.TrimStart('/');
+
         if (normalized.Contains("..") || Path.IsPathRooted(normalized))
             return false;
 

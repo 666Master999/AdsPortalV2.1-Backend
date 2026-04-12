@@ -13,7 +13,7 @@ namespace AdsPortalV2.Controllers;
 public class NotificationsController(AppDbContext db) : ControllerBase
 {
     [HttpGet]
-    public async Task<IActionResult> GetAll()
+    public async Task<ActionResult<NotificationsResultDto>> GetAll()
     {
         if (!User.TryGetUserId(out var userId)) return Unauthorized();
 
@@ -53,7 +53,7 @@ public class NotificationsController(AppDbContext db) : ControllerBase
     }
 
     [HttpPost("read")]
-    public async Task<IActionResult> MarkAsRead([FromBody] int[]? ids = null)
+    public async Task<ActionResult> MarkAsRead([FromBody] int[]? ids = null)
     {
         if (!User.TryGetUserId(out var userId)) return Unauthorized();
 

@@ -7,7 +7,7 @@ namespace AdsPortalV2.Services;
 
 public class PresenceCleanupService(
     OnlineUserTracker tracker,
-    IHubContext<OnlineHub> hub,
+    IHubContext<ChatHub> hub,
     IServiceScopeFactory scopeFactory) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -23,38 +23,14 @@ public class PresenceCleanupService(
 
             foreach (var userId in offlineUsers)
             {
-                await db.Users.Where(u => u.Id == userId)
-                    .ExecuteUpdateAsync(s => s.SetProperty(u => u.LastActivityAt, DateTime.UtcNow), stoppingToken);
-
-                var convIds = await db.Conversations
-                    .AsNoTracking()
-                    .Where(c => c.SellerId == userId || c.BuyerId == userId)
-                    .Select(c => c.Id)
-                    .ToListAsync(stoppingToken);
-
-                foreach (var convId in convIds)
+                // offlineUsers are string ids; try parse to int for DB update
+                if (int.TryParse(userId, out var uid))
                 {
-                    var conv = await db.Conversations
-                        .AsNoTracking()
-                        .Where(c => c.Id == convId)
-                        .Select(c => new
-                        {
-                            c.Id,
-                            Seller = new { c.Seller.Id, Name = c.Seller.UserName ?? c.Seller.UserLogin },
-                            Buyer = new { c.Buyer.Id, Name = c.Buyer.UserName ?? c.Buyer.UserLogin }
-                        })
-                        .FirstOrDefaultAsync(stoppingToken);
-
-                    if (conv == null) continue;
-
-                    var users = new[] { (conv.Seller.Id, conv.Seller.Name), (conv.Buyer.Id, conv.Buyer.Name) }
-                        .Where(p => tracker.IsOnline(p.Id))
-                        .Select(p => new { userId = p.Id, userName = p.Name })
-                        .ToArray();
-
-                    await hub.Clients.Group($"conversation:{conv.Id}")
-                        .SendAsync("chat:onlineUsers", new { conversationId = conv.Id, users }, stoppingToken);
+                    await db.Users.Where(u => u.Id == uid)
+                        .ExecuteUpdateAsync(s => s.SetProperty(u => u.LastActivityAt, DateTime.UtcNow), stoppingToken);
                 }
+                // Do not emit presence events from cleanup. Presence events are emitted on real disconnects.
+                // Cleanup only updates DB state (LastActivityAt) to avoid duplicate/incorrect presence events.
             }
         }
     }

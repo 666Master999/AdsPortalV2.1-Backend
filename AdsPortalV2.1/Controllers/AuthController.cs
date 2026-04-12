@@ -16,7 +16,7 @@ public class AuthController(AppDbContext db, ITokenService tokens, PermissionSer
     private static readonly TimeSpan RefreshTokenLifetime = TimeSpan.FromDays(30);
 
     [HttpPost("register")]
-    public async Task<IActionResult> Register([FromBody] RegisterRequest req)
+    public async Task<ActionResult<AuthSessionResponseDto>> Register([FromBody] RegisterRequest req)
     {
         if (string.IsNullOrWhiteSpace(req.UserLogin) || string.IsNullOrWhiteSpace(req.UserPassword))
             return BadRequest(new ApiError("validation_error", "Login and password are required"));
@@ -38,7 +38,7 @@ public class AuthController(AppDbContext db, ITokenService tokens, PermissionSer
     }
 
     [HttpPost("login")]
-    public async Task<IActionResult> Login([FromBody] LoginRequest req)
+    public async Task<ActionResult<AuthSessionResponseDto>> Login([FromBody] LoginRequest req)
     {
         var user = await db.Users.FirstOrDefaultAsync(u => u.UserLogin == req.UserLogin);
         if (user == null || !PasswordService.Verify(user.UserPasswordHash, req.UserPassword))
@@ -55,7 +55,7 @@ public class AuthController(AppDbContext db, ITokenService tokens, PermissionSer
     }
 
     [HttpPost("refresh")]
-    public async Task<IActionResult> Refresh([FromBody] RefreshRequest req)
+    public async Task<ActionResult<AuthRefreshResponseDto>> Refresh([FromBody] RefreshRequest req)
     {
         var hash = tokens.HashToken(req.RefreshToken);
         var session = await db.AuthSessions
@@ -78,7 +78,7 @@ public class AuthController(AppDbContext db, ITokenService tokens, PermissionSer
 
     [Authorize]
     [HttpPost("logout")]
-    public async Task<IActionResult> Logout()
+    public async Task<ActionResult> Logout()
     {
         if (!User.TryGetSessionId(out var sessionId))
             return Unauthorized();
@@ -96,7 +96,7 @@ public class AuthController(AppDbContext db, ITokenService tokens, PermissionSer
 
     [Authorize]
     [HttpPost("logout-all")]
-    public async Task<IActionResult> LogoutAll()
+    public async Task<ActionResult> LogoutAll()
     {
         if (!User.TryGetUserId(out var userId))
             return Unauthorized();
@@ -117,7 +117,7 @@ public class AuthController(AppDbContext db, ITokenService tokens, PermissionSer
 
     [Authorize]
     [HttpGet("sessions")]
-    public async Task<IActionResult> GetSessions()
+    public async Task<ActionResult<IReadOnlyCollection<AuthSessionDto>>> GetSessions()
     {
         if (!User.TryGetUserId(out var userId) || !User.TryGetSessionId(out var currentSessionId))
             return Unauthorized();
@@ -134,7 +134,7 @@ public class AuthController(AppDbContext db, ITokenService tokens, PermissionSer
 
     [Authorize]
     [HttpDelete("sessions/{id:guid}")]
-    public async Task<IActionResult> RevokeSession(Guid id)
+    public async Task<ActionResult> RevokeSession(Guid id)
     {
         if (!User.TryGetUserId(out var userId))
             return Unauthorized();
@@ -152,7 +152,7 @@ public class AuthController(AppDbContext db, ITokenService tokens, PermissionSer
 
     [Authorize]
     [HttpGet("/me/restrictions")]
-    public async Task<IActionResult> GetMyRestrictions()
+    public async Task<ActionResult<IReadOnlyCollection<MeRestrictionDto>>> GetMyRestrictions()
     {
         if (!User.TryGetUserId(out var userId)) return Unauthorized();
         var ctx = await perms.GetUserContextAsync(userId);

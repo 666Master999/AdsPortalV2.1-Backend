@@ -6,12 +6,12 @@ using Microsoft.EntityFrameworkCore;
 
 namespace AdsPortalV2.Services;
 
-public class NotificationService(AppDbContext db, IHubContext<NotificationHub> hub) : INotificationService
+public class NotificationService(AppDbContext db, IHubContext<SystemNotificationHub> hub) : INotificationService
 {
-    public async Task SendAsync(Notification notification)
+    public async Task SendAsync(Notification notification, CancellationToken cancellationToken = default)
     {
         db.Notifications.Add(notification);
-        await db.SaveChangesAsync();
+        await db.SaveChangesAsync(cancellationToken);
 
         string? image = null;
         if (notification.AdId.HasValue)
@@ -20,7 +20,7 @@ public class NotificationService(AppDbContext db, IHubContext<NotificationHub> h
                 .AsNoTracking()
                 .Where(a => a.Id == notification.AdId.Value)
                 .Select(a => a.MainImageId)
-                .FirstOrDefaultAsync();
+                .FirstOrDefaultAsync(cancellationToken);
 
             if (mainImageId.HasValue)
             {
@@ -28,11 +28,11 @@ public class NotificationService(AppDbContext db, IHubContext<NotificationHub> h
                     .AsNoTracking()
                     .Where(i => i.Id == mainImageId.Value)
                     .Select(i => i.FilePath)
-                    .FirstOrDefaultAsync();
+                    .FirstOrDefaultAsync(cancellationToken);
             }
         }
 
         var dto = NotificationMapper.ToDto(notification, image);
-        await hub.Clients.Group($"user:{notification.UserId}").SendAsync("notificationCreated", dto);
+        await hub.Clients.Group($"user:{notification.UserId}").SendAsync("notificationCreated", dto, cancellationToken);
     }
 }

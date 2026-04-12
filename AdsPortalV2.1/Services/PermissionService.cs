@@ -15,7 +15,7 @@ public class PermissionService(AppDbContext db, IMemoryCache cache)
 {
     private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(10);
 
-    public async Task<UserContext> GetUserContextAsync(int userId)
+    public async Task<UserContext> GetUserContextAsync(int userId, CancellationToken cancellationToken = default)
     {
         var key = $"uctx:{userId}";
         if (cache.TryGetValue<UserContext>(key, out var cached) && cached != null)
@@ -25,21 +25,21 @@ public class PermissionService(AppDbContext db, IMemoryCache cache)
             .AsNoTracking()
             .Where(ur => ur.UserId == userId)
             .Select(ur => ur.Role.Name)
-            .ToHashSetAsync();
+            .ToHashSetAsync(cancellationToken);
 
         var permissions = roles.Count > 0
             ? await db.Set<RolePermission>()
                 .AsNoTracking()
                 .Where(rp => roles.Contains(rp.Role.Name))
                 .Select(rp => rp.Permission.Name)
-                .ToHashSetAsync()
+                .ToHashSetAsync(cancellationToken)
             : [];
 
         var now = DateTime.UtcNow;
         var restrictions = await db.Set<UserRestriction>()
             .AsNoTracking()
             .Where(r => r.UserId == userId && (r.ExpiresAt == null || r.ExpiresAt > now))
-            .ToListAsync();
+            .ToListAsync(cancellationToken);
 
         var ctx = new UserContext(userId, roles, permissions, restrictions);
         cache.Set(key, ctx, CacheTtl);

@@ -21,6 +21,7 @@ public class AdsController(
     ILogger<AdsController> _logger,
     AdQueryService _adQueryService,
     AdVisibilityService _adVisibility,
+    IAdDetailsService _adDetailsService,
     IAuthorizationService _authorizationService,
     PermissionService perms,
     IDomainEventPublisher _events,
@@ -28,6 +29,8 @@ public class AdsController(
     INotificationService _notifications,
     IAdImagePatchService _imagePatchService) : ControllerBase
 {
+    // Use centralized helper
+    private static string EnsurePublicPath(string? path) => AdsPortalV2.Models.FilePathHelpers.EnsurePublicPath(path);
     private static readonly Dictionary<string, Expression<Func<Ad, object?>>> _sortMap = new(StringComparer.OrdinalIgnoreCase)
     {
         [AdFieldNames.Title] = ad => ad.Title,
@@ -41,44 +44,54 @@ public class AdsController(
     // PATCH: /ads/{id}/moderation
     [Authorize(Policy = AuthorizationPolicies.CanModerateAd)]
     [HttpPatch("{id}/moderation")]
-    public async Task<IActionResult> PatchModerationStatus(int id, [FromBody] AdStatus status)
+    public async Task<ActionResult<AdDto>> PatchModerationStatus(int id, [FromBody] UpdateModerationRequest req, CancellationToken cancellationToken)
     {
         if (!User.TryGetUserId(out var actorId))
             return Unauthorized();
 
-        var ad = await db.Ads.FirstOrDefaultAsync(a => a.Id == id);
+        var ad = await db.Ads.FirstOrDefaultAsync(a => a.Id == id, cancellationToken);
         if (ad == null)
             return NotFound();
 
         var previousStatus = ad.Status;
-        ad.Status = status;
+        ad.Status = req.Status;
         ad.UpdatedAt = DateTime.UtcNow;
 
         Notification? notification = null;
-        if (status != previousStatus && status is AdStatus.Active or AdStatus.Rejected)
+        if (req.Status != previousStatus && req.Status is AdStatus.Active or AdStatus.Rejected)
         {
             var actorName = await db.Users
                 .AsNoTracking()
                 .Where(u => u.Id == actorId)
                 .Select(u => u.UserName ?? u.UserLogin)
-                .FirstAsync();
+                .FirstAsync(cancellationToken);
 
-            notification = status == AdStatus.Active
+            // Save rejection reason when applicable
+            if (req.Status == AdStatus.Rejected && string.IsNullOrWhiteSpace(req.Reason))
+            {
+                return BadRequest(new ApiError("validation_error", "Reason is required when rejecting an ad."));
+            }
+            ad.RejectionReason = req.Reason;
+
+            notification = req.Status == AdStatus.Active
                 ? _notificationFactory.CreateAdApproved(ad.UserId, ad.Id, ad.Title, actorName)
                 : _notificationFactory.CreateAdRejected(ad.UserId, ad.Id, ad.Title, ad.RejectionReason ?? "Не указана", actorName);
         }
 
-        await db.SaveChangesAsync();
-        _events.Publish(status == AdStatus.Active
-            ? new AdApproved(ad.Id, actorId)
-            : status == AdStatus.Rejected
-                ? new AdRejected(ad.Id, actorId, ad.RejectionReason)
-                : new AdCreated(ad.Id, ad.UserId));
+        await db.SaveChangesAsync(cancellationToken);
+        if (req.Status == AdStatus.Active)
+        {
+            _events.Publish(new AdApproved(ad.Id, actorId));
+        }
+        else if (req.Status == AdStatus.Rejected)
+        {
+            _events.Publish(new AdRejected(ad.Id, actorId, ad.RejectionReason));
+        }
 
-        Log.AdModeration(_logger, id, previousStatus, status);
+        Log.AdModeration(_logger, id, previousStatus, req.Status);
 
         if (notification != null)
-            await _notifications.SendAsync(notification);
+            await _notifications.SendAsync(notification, cancellationToken);
 
         return Ok(new AdDto(ad.Id, ad.UserId, ad.CategoryId, ad.Title, ad.Description, ad.Price, ad.ListingType, ad.IsNegotiable,
             ad.LocationId, ad.CreatedAt, ad.UpdatedAt, (AdStatus)ad.Status, ad.RejectionReason, ad.DeletedAt, ad.ViewsCount, ad.FavoritesCount));
@@ -86,7 +99,7 @@ public class AdsController(
     // GET: /ads/moderation
     [Authorize(Policy = AuthorizationPolicies.CanModerateAd)]
     [HttpGet("moderation")]
-    public async Task<IActionResult> GetModerationList()
+    public async Task<ActionResult<IReadOnlyCollection<ModerationAdDto>>> GetModerationList()
     {
         var result = await db.Ads
             .Where(ad => ad.Status == AdStatus.PendingModeration)
@@ -105,13 +118,13 @@ public class AdsController(
                 ad.UserId,
                 ad.User != null ? ad.User.UserName : null,
                 ad.User != null ? ad.User.UserLogin : null,
-                db.AdImages.Where(img => img.Id == ad.MainImageId).Select(img => img.FilePath).FirstOrDefault()))
+                EnsurePublicPath(db.AdImages.Where(img => img.Id == ad.MainImageId).Select(img => img.FilePath).FirstOrDefault())))
             .ToListAsync();
 
         return Ok(result);
     }
     [HttpGet]
-    public async Task<IActionResult> GetAll([FromQuery] AdsQuery q)
+    public async Task<ActionResult<PagedResultDto<AdListItemDto>>> GetAll([FromQuery] AdsQuery q)
     {
         var page = Math.Max(1, q.Page);
         var pageSize = Math.Clamp(q.PageSize, 1, 50);
@@ -175,10 +188,10 @@ public class AdsController(
             UserId = ad.UserId,
             ViewsCount = ad.ViewsCount,
             FavoritesCount = ad.FavoritesCount,
-            MainImageUrl = db.AdImages
+            MainImagePath = EnsurePublicPath(db.AdImages
                 .Where(img => img.Id == ad.MainImageId)
                 .Select(img => img.FilePath)
-                .FirstOrDefault(),
+                .FirstOrDefault()),
             IsFavorite = currentUserId.HasValue && db.UserFavoriteAds.Any(f => f.UserId == currentUserId.Value && f.AdId == ad.Id),
             ModerationStatus = hasViewHidden || (currentUserId.HasValue && ad.UserId == currentUserId.Value) ? (AdStatus?)ad.Status : null
         }).Skip((page - 1) * pageSize).Take(pageSize).ToListAsync();
@@ -187,7 +200,7 @@ public class AdsController(
     }
 
     [HttpGet("{id}")]
-    public async Task<IActionResult> GetById(int id)
+    public async Task<ActionResult<AdDetailsDto>> GetById(int id)
     {
         int? userId = User.TryGetUserId(out var uid) ? uid : null;
         var hasViewHidden = (await _authorizationService.AuthorizeAsync(User, null, AuthorizationPolicies.CanViewHiddenAd)).Succeeded;
@@ -215,62 +228,9 @@ public class AdsController(
             }
         }
 
-        var dto = await db.Ads.AsNoTracking()
-            .Where(a => a.Id == id)
-            .Select(a => new AdDetailsDto(
-                a.Id,
-                a.UserId,
-                a.CategoryId,
-                a.Title,
-                a.Description,
-                a.Price,
-                a.IsNegotiable,
-                a.LocationId,
-                a.Location == null ? null : new LocationRef(a.Location.Type, a.Location.Id, a.Location.Name),
-                a.ListingType,
-                a.CreatedAt,
-                a.UpdatedAt,
-                (hasViewHidden || isOwner) ? a.Status : null,
-                (hasViewHidden || isOwner) ? a.RejectionReason : null,
-                a.DeletedAt,
-                a.Category == null ? null : new AdCategoryDto(a.Category.Id, a.Category.Name, a.Category.ParentId),
-                a.User == null ? null : new AdOwnerDto(
-                    a.User.Id,
-                    a.User.UserLogin,
-                    a.User.UserName,
-                    a.User.UserEmail,
-                    a.User.UserPhoneNumber,
-                    a.User.AvatarPath,
-                    Array.Empty<string>(),
-                    a.User.CreatedAt,
-                    a.User.LastActivityAt),
-                Array.Empty<AdImageDto>(),
-                userId.HasValue && db.UserFavoriteAds.Any(fav => fav.UserId == userId.Value && fav.AdId == a.Id)))
-            .FirstAsync();
-
-        if (dto.User != null)
-        {
-            var roleNames = await db.UserRoles
-                .AsNoTracking()
-                .Where(ur => ur.UserId == dto.UserId)
-                .Join(db.Roles.AsNoTracking(), ur => ur.RoleId, role => role.Id, (_, role) => role.Name)
-                .ToListAsync();
-
-            dto = dto with { User = dto.User with { Roles = roleNames } };
-        }
-
-        if (dto.Images.Count == 0)
-        {
-            dto = dto with
-            {
-                Images = await db.AdImages
-                    .AsNoTracking()
-                    .Where(img => img.AdId == id)
-                    .OrderBy(img => img.SortOrder)
-                    .Select(img => new AdImageDto(img.Id, img.AdId, img.FilePath, img.SortOrder))
-                    .ToListAsync()
-            };
-        }
+        var dto = await _adDetailsService.GetAsync(id, userId, hasViewHidden || isOwner);
+        if (dto == null)
+            return NotFound(new ApiError("not_found", "Объявление не найдено."));
 
         return Ok(dto);
     }
@@ -279,18 +239,18 @@ public class AdsController(
     [Authorize]
     [EnableRateLimiting("CreateAdPerDay")]
     [HttpPost]
-    public async Task<IActionResult> Create(
+    public async Task<ActionResult<CreateAdResultDto>> Create(
         [FromForm] Models.CreateAdRequest req,
         [FromForm] List<IFormFile>? files,
         [FromForm] int? mainImageIndex)
     {
-        Dictionary<string, string> fields = [];
-        if (string.IsNullOrWhiteSpace(req.Title)) fields[AdFieldNames.Title] = "Title is required.";
-        if (!req.CategoryId.HasValue || req.CategoryId.Value <= 0) fields[AdFieldNames.CategoryId] = "CategoryId is required.";
-        if (!req.LocationId.HasValue || req.LocationId.Value <= 0) fields[AdFieldNames.LocationId] = "LocationId is required.";
+        List<PatchIssueDto> issues = [];
+        if (string.IsNullOrWhiteSpace(req.Title)) issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.Title, "Title is required."));
+        if (!req.CategoryId.HasValue || req.CategoryId.Value <= 0) issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.CategoryId, "CategoryId is required."));
+        if (!req.LocationId.HasValue || req.LocationId.Value <= 0) issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.LocationId, "LocationId is required."));
 
-        if (fields.Count > 0)
-            return BadRequest(new ApiError("validation_error", "Validation failed.", fields));
+        if (issues.Count > 0)
+            return BadRequest(new ApiError("validation_error", "Validation failed.", issues));
 
         if (!User.TryGetUserId(out var creatorId))
             return Unauthorized();
@@ -320,14 +280,15 @@ public class AdsController(
 
         Log.AdCreated(_logger, ad.Id, creatorId);
 
-        if (files?.Count > 0)
-        {
-            var savedImages = await SaveAdImages(ad.Id, files, mainImageIndex);
-            return Ok(new CreateAdResultDto(
-                "Ad created with images successfully.",
-                ad.Id,
-                [.. savedImages.Select(img => new AdImageDto(img.Id, img.AdId, img.FilePath, img.SortOrder))]));
-        }
+            if (files?.Count > 0)
+            {
+                var savedImages = await SaveAdImages(ad.Id, files, mainImageIndex);
+                var mainImageId = await db.Ads.Where(a => a.Id == ad.Id).Select(a => a.MainImageId).FirstOrDefaultAsync();
+                return Ok(new CreateAdResultDto(
+                    "Ad created with images successfully.",
+                    ad.Id,
+                    [.. savedImages.Select(img => new AdImageDto(img.Id, img.AdId, EnsurePublicPath(img.FilePath), img.SortOrder, img.Id == mainImageId))]));
+            }
 
         return Ok(new CreateAdResultDto("Ad created successfully.", ad.Id));
     }
@@ -335,7 +296,7 @@ public class AdsController(
     // DELETE: /ads/5
     [Authorize]
     [HttpDelete("{id}")]
-    public async Task<IActionResult> Delete(int id)
+    public async Task<ActionResult<CreateAdResultDto>> Delete(int id)
     {
         var ad = await db.Ads.FirstOrDefaultAsync(ad => ad.Id == id && ad.Status != AdStatus.Deleted);
         if (ad == null)
@@ -359,7 +320,7 @@ public class AdsController(
 
     [Authorize]
     [HttpPatch("{id}")]
-    public async Task<IActionResult> Update(int id, [FromBody] Dictionary<string, JsonElement> data)
+    public async Task<ActionResult<PatchResultDto>> Update(int id, [FromBody] Dictionary<string, JsonElement> data)
     {
         var ad = await db.Ads.Include(a => a.Images).FirstOrDefaultAsync(a => a.Id == id);
         if (ad == null)
@@ -373,15 +334,15 @@ public class AdsController(
             return Forbid();
 
         HashSet<string> updated = [];
-        List<string> skipped = [];
-        List<PatchErrorDto> errors = [];
+        List<PatchIssueDto> skipped = [];
+        List<PatchIssueDto> errors = [];
 
         var patchMap = BuildPatchMap(ad, updated, skipped, errors);
 
         foreach (var kv in data)
         {
             if (!patchMap.TryGetValue(kv.Key, out var handler))
-                errors.Add(new PatchErrorDto(PatchErrorCodes.NotAllowed, kv.Key, $"Field '{kv.Key}' is not allowed."));
+                errors.Add(new PatchIssueDto(PatchErrorCodes.NotAllowed, kv.Key, $"Field '{kv.Key}' is not allowed."));
             else
                 handler(kv.Value);
         }
@@ -401,12 +362,12 @@ public class AdsController(
     private Dictionary<string, Action<JsonElement>> BuildPatchMap(
         Ad ad,
         ICollection<string> updated,
-        ICollection<string> skipped,
-        ICollection<PatchErrorDto> errors)
+        ICollection<PatchIssueDto> skipped,
+        ICollection<PatchIssueDto> errors)
     {
         return new(StringComparer.OrdinalIgnoreCase)
         {
-            [AdFieldNames.Title] = v => PatchHelpers.UpdateString(v, ad.Title, x => ad.Title = x, AdFieldNames.Title, updated, skipped, errors, required: true),
+            [AdFieldNames.Title] = v => PatchHelpers.UpdateString(v, ad.Title, x => ad.Title = x, AdFieldNames.Title, updated, skipped, errors),
             [AdFieldNames.Description] = v => PatchHelpers.UpdateNullableString(v, ad.Description, x => ad.Description = x, AdFieldNames.Description, updated, skipped, errors),
             [AdFieldNames.Price] = v => PatchHelpers.UpdateNullableDecimal(v, ad.Price, x => ad.Price = x, AdFieldNames.Price, updated, skipped, errors),
             [AdFieldNames.IsNegotiable] = v => PatchHelpers.UpdateBool(v, ad.IsNegotiable, x => ad.IsNegotiable = x, AdFieldNames.IsNegotiable, updated, skipped, errors),
@@ -463,7 +424,7 @@ public class AdsController(
 
     [Authorize]
     [HttpPost("{id}/upload")]
-    public async Task<IActionResult> UploadAdImages(int id, List<IFormFile> files)
+    public async Task<ActionResult<UploadFilesResultDto>> UploadAdImages(int id, [FromForm(Name = "files")] IFormFileCollection files)
     {
         var ad = await db.Ads.FindAsync(id);
         if (ad == null)
@@ -476,7 +437,7 @@ public class AdsController(
         if (ad.UserId != uploadUserId && !canModerate)
             return Forbid();
 
-        if (files == null || files.Count == 0)
+        if (files.Count == 0)
             return BadRequest(new ApiError("validation_error", "No files provided."));
 
         var uploadDir = Path.Combine("wwwroot", "files", uploadUserId.ToString(), "Ads", id.ToString());
@@ -484,16 +445,15 @@ public class AdsController(
 
         var uploadedPaths = new List<string>();
 
-        for (int i = 0; i < files.Count; i++)
+        foreach (var file in files)
         {
-            var file = files[i];
             var ext = Path.GetExtension(file.FileName);
             var fileName = _imageService.GenerateShortFileName(ext);
             await using var stream = file.OpenReadStream();
             await _imageService.SaveCompressedImageAsync(stream, uploadDir, fileName);
 
             var relativePath = Path.Combine("files", uploadUserId.ToString(), "Ads", id.ToString(), fileName).Replace('\\', '/');
-            uploadedPaths.Add(relativePath);
+            uploadedPaths.Add(FilePathHelpers.EnsurePublicPath(relativePath));
         }
 
         return Ok(new UploadFilesResultDto(uploadedPaths));

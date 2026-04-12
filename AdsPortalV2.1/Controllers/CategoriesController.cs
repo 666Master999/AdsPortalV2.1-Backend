@@ -12,7 +12,7 @@ namespace AdsPortalV2.Controllers;
 public class CategoriesController(AppDbContext db) : ControllerBase
 {
     [HttpGet]
-    public async Task<IActionResult> GetAll() =>
+    public async Task<ActionResult<IReadOnlyCollection<CategoryDto>>> GetAll() =>
         Ok(await db.Categories
             .AsNoTracking()
             .Select(c => new CategoryDto(c.Id, c.Name, c.ParentId))
@@ -21,7 +21,7 @@ public class CategoriesController(AppDbContext db) : ControllerBase
     [Authorize]
     [Authorize(Policy = "CanManageCategories")]
     [HttpPost]
-    public async Task<IActionResult> Create([FromBody] UpsertCategoryDto request)
+    public async Task<ActionResult<CategoryDto>> Create([FromBody] UpsertCategoryDto request)
     {
         var category = new Category { Name = request.Name, ParentId = request.ParentId };
         db.Categories.Add(category);
@@ -32,7 +32,7 @@ public class CategoriesController(AppDbContext db) : ControllerBase
     [Authorize]
     [Authorize(Policy = "CanManageCategories")]
     [HttpPut("{id}")]
-    public async Task<IActionResult> Update(int id, [FromBody] UpsertCategoryDto updated)
+    public async Task<ActionResult<CategoryDto>> Update(int id, [FromBody] UpsertCategoryDto updated)
     {
         var category = await db.Categories.FindAsync(id);
         if (category == null) return NotFound();
@@ -47,7 +47,7 @@ public class CategoriesController(AppDbContext db) : ControllerBase
     [Authorize]
     [Authorize(Policy = "CanManageCategories")]
     [HttpDelete("{id}")]
-    public async Task<IActionResult> Delete(int id)
+    public async Task<ActionResult> Delete(int id)
     {
         var category = await db.Categories.FindAsync(id);
         if (category == null) return NotFound();

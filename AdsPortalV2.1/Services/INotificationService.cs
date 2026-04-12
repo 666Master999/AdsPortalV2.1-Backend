@@ -4,5 +4,5 @@ namespace AdsPortalV2.Services;
 
 public interface INotificationService
 {
-    Task SendAsync(Notification notification);
+    Task SendAsync(Notification notification, CancellationToken cancellationToken = default);
 }

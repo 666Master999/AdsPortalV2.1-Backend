@@ -10,7 +10,7 @@ namespace AdsPortalV2.Controllers;
 public class LocationsController(AppDbContext db) : ControllerBase
 {
     [HttpGet]
-    public async Task<IActionResult> GetTree()
+    public async Task<ActionResult<IReadOnlyCollection<LocationTreeNodeDto>>> GetTree()
     {
         var items = await db.Locations
             .AsNoTracking()

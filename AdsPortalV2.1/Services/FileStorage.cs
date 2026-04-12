@@ -36,4 +36,14 @@ public class FileStorage : IFileStorage
         normalizedRelativePath = Path.GetRelativePath(Root, fullPath).Replace('\\', '/');
         return true;
     }
+
+    public Task CreateConversationFoldersAsync(AdsPortalV2.Entities.Conversation conv)
+    {
+        var webRoot = Root;
+        var dialogFolder = conv.DialogFolderPath ?? $"files/{conv.SellerId}/Ads/{conv.AdId}/dialogs/{conv.Id}";
+        var attachFolder = Path.Combine(webRoot, dialogFolder.TrimStart('/').Replace('/', Path.DirectorySeparatorChar), "attachments");
+        Directory.CreateDirectory(Path.Combine(webRoot, dialogFolder.TrimStart('/').Replace('/', Path.DirectorySeparatorChar)));
+        Directory.CreateDirectory(attachFolder);
+        return Task.CompletedTask;
+    }
 }

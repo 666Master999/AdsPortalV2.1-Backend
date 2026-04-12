@@ -14,21 +14,21 @@ public class AdImagePatchService(
         Ad ad,
         JsonElement raw,
         ICollection<string> updated,
-        ICollection<string> skipped,
-        ICollection<PatchErrorDto> errors)
+        ICollection<PatchIssueDto> skipped,
+        ICollection<PatchIssueDto> errors)
     {
         if (raw.ValueKind is JsonValueKind.Undefined)
             return;
 
         if (raw.ValueKind is JsonValueKind.Null)
         {
-            skipped.Add(AdFieldNames.Images);
+            skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, AdFieldNames.Images, "Images not changed."));
             return;
         }
 
         if (raw.ValueKind is not JsonValueKind.Array)
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, AdFieldNames.Images, "Images must be an array."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.Images, "Images must be an array."));
             return;
         }
 
@@ -40,12 +40,12 @@ public class AdImagePatchService(
         Ad ad,
         JsonElement image,
         ICollection<string> updated,
-        ICollection<string> skipped,
-        ICollection<PatchErrorDto> errors)
+        ICollection<PatchIssueDto> skipped,
+        ICollection<PatchIssueDto> errors)
     {
         if (image.ValueKind is not JsonValueKind.Object)
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, AdFieldNames.Images, "Image item must be an object."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.Images, "Image item must be an object."));
             return;
         }
 
@@ -63,7 +63,7 @@ public class AdImagePatchService(
         catch (Exception ex)
         {
             logger.LogError(ex, "Image patch failed for ad {AdId}", ad.Id);
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InternalError, AdFieldNames.Images, "Internal error while processing image."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InternalError, AdFieldNames.Images, "Internal error while processing image."));
         }
     }
 
@@ -87,18 +87,18 @@ public class AdImagePatchService(
         Ad ad,
         ImagePatchContext ctx,
         ICollection<string> updated,
-        ICollection<PatchErrorDto> errors)
+        ICollection<PatchIssueDto> errors)
     {
         if (!ctx.Id.HasValue)
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, AdFieldNames.Images, "Image id is required for delete."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.Images, "Image id is required for delete."));
             return;
         }
 
         var image = ad.Images.FirstOrDefault(i => i.Id == ctx.Id.Value);
         if (image == null)
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.NotFound, AdFieldNames.Images, "Image not found."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.NotFound, AdFieldNames.Images, "Image not found."));
             return;
         }
 
@@ -128,19 +128,19 @@ public class AdImagePatchService(
         Ad ad,
         ImagePatchContext ctx,
         ICollection<string> updated,
-        ICollection<string> skipped,
-        ICollection<PatchErrorDto> errors)
+        ICollection<PatchIssueDto> skipped,
+        ICollection<PatchIssueDto> errors)
     {
         var image = ad.Images.FirstOrDefault(i => i.Id == ctx.Id);
         if (image == null)
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.NotFound, AdFieldNames.Images, "Image not found."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.NotFound, AdFieldNames.Images, "Image not found."));
             return;
         }
 
         if (!ctx.SortOrder.HasValue)
         {
-            skipped.Add(AdFieldNames.Images);
+            skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, AdFieldNames.Images, "Images not changed."));
             return;
         }
 
@@ -151,23 +151,23 @@ public class AdImagePatchService(
         Ad ad,
         ImagePatchContext ctx,
         ICollection<string> updated,
-        ICollection<PatchErrorDto> errors)
+        ICollection<PatchIssueDto> errors)
     {
         if (string.IsNullOrWhiteSpace(ctx.FilePath))
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, AdFieldNames.Images, "Invalid image data."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.Images, "Invalid image data."));
             return;
         }
 
         if (!fileStorage.TryNormalize(ctx.FilePath, out var relativePath))
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, AdFieldNames.Images, "Invalid filePath."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.Images, "Invalid filePath."));
             return;
         }
 
         if (!fileStorage.ExistsNormalized(relativePath))
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.NotFound, AdFieldNames.Images, "File not found."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.NotFound, AdFieldNames.Images, "File not found."));
             return;
         }
 

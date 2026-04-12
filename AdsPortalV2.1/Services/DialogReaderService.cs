@@ -1,44 +1,44 @@
 using System.Text.Json;
+using System.Diagnostics;
 using AdsPortalV2.Data;
 using AdsPortalV2.Entities;
 using AdsPortalV2.Models;
+using Microsoft.EntityFrameworkCore;
 using static AdsPortalV2.Services.DialogHelpers;
 
 namespace AdsPortalV2.Services;
 
-public class DialogReaderService(IWebHostEnvironment env)
+public class DialogReaderService(IWebHostEnvironment env, DialogWriterService writer, ILogger<DialogReaderService> logger)
 {
     // scroll up: id < beforeId
     public async Task<(List<ChatMessage> Messages, bool HasMore)> GetMessagesAsync(
         Conversation conv, int count, int? beforeId = null)
     {
+        var cached = writer.GetLastMessagesFromCache(conv.Id, count, beforeId);
+        if (cached.HasValue) return cached.Value;
+
         var folder = GetFolder(conv);
         if (!Directory.Exists(folder)) return ([], false);
 
         var meta = await LoadDialogMetaAsync(folder);
         if (meta == null) return ([], false);
 
-        var startFile = beforeId.HasValue ? FindFileIndex(meta, beforeId.Value) : meta.LastFileIndex;
-        var result = new List<ChatMessage>(count + 1);
+        var sw = Stopwatch.StartNew();
+        var all = await ToListAsync(ReadMaterializedMessagesAsync(folder, meta));
+        var ordered = beforeId.HasValue
+            ? all.Where(m => m.Id < beforeId.Value).OrderBy(m => m.Id).ToList()
+            : all.OrderBy(m => m.Id).ToList();
 
-        for (var i = startFile; i >= 0 && result.Count <= count; i--)
+        var hasMore = ordered.Count > count;
+        var result = hasMore ? ordered.TakeLast(count).ToList() : ordered;
+        sw.Stop();
+        logger.LogInformation("tail read for conversation {ConversationId} took {ElapsedMs} ms", conv.Id, sw.ElapsedMilliseconds);
+
+        // If this is the last page (opening chat), populate last messages cache for faster subsequent reads
+        if (beforeId == null)
         {
-            var path = Path.Combine(folder, BuildFileName(i));
-            if (!File.Exists(path)) continue;
-            var lines = await File.ReadAllLinesAsync(path);
-            for (var j = lines.Length - 1; j >= 0 && result.Count <= count; j--)
-            {
-                if (string.IsNullOrWhiteSpace(lines[j])) continue;
-                var msg = JsonSerializer.Deserialize<ChatMessage>(lines[j], s_jsonl);
-                if (msg == null || (beforeId.HasValue && msg.Id >= beforeId.Value)) continue;
-                if (msg.DeletedAt.HasValue) msg.Text = null;
-                result.Add(msg);
-            }
+            writer.PopulateLastMessagesCache(conv.Id, result);
         }
-
-        var hasMore = result.Count > count;
-        if (hasMore) result.RemoveAt(result.Count - 1);
-        result.Reverse();
         return (result, hasMore);
     }
 
@@ -46,27 +46,28 @@ public class DialogReaderService(IWebHostEnvironment env)
     public async Task<(List<ChatMessage> Messages, bool HasMore)> GetMessagesSinceAsync(
         Conversation conv, int fromMessageId)
     {
+        var cachedSince = writer.GetMessagesSinceFromCache(conv.Id, fromMessageId);
+        if (cachedSince.HasValue)
+        {
+            return cachedSince.Value;
+        }
+
         var folder = GetFolder(conv);
         if (!Directory.Exists(folder)) return ([], false);
 
         var meta = await LoadDialogMetaAsync(folder);
         if (meta == null) return ([], false);
 
-        var startFile = FindFileIndex(meta, fromMessageId);
-        var result = new List<ChatMessage>();
+        var sw = Stopwatch.StartNew();
+        var result = await ToListAsync(ReadMaterializedMessagesAsync(folder, meta, fromMessageId));
+        result = [.. result.Where(m => m.Id >= fromMessageId).OrderBy(m => m.Id)];
+        sw.Stop();
+        logger.LogInformation("since read for conversation {ConversationId} took {ElapsedMs} ms", conv.Id, sw.ElapsedMilliseconds);
 
-        for (var i = startFile; i <= meta.LastFileIndex; i++)
+        // populate cache only if this is a recent result near the tail
+        if (result.Count > 0 && meta.LastMessageId - result[^1].Id < writer.LastMessagesCacheCapacity)
         {
-            var path = Path.Combine(folder, BuildFileName(i));
-            if (!File.Exists(path)) continue;
-            foreach (var line in await File.ReadAllLinesAsync(path))
-            {
-                if (string.IsNullOrWhiteSpace(line)) continue;
-                var msg = JsonSerializer.Deserialize<ChatMessage>(line, s_jsonl);
-                if (msg == null || msg.Id < fromMessageId) continue;
-                if (msg.DeletedAt.HasValue) msg.Text = null;
-                result.Add(msg);
-            }
+            writer.PopulateLastMessagesCache(conv.Id, result);
         }
 
         return (result, false);
@@ -78,27 +79,57 @@ public class DialogReaderService(IWebHostEnvironment env)
         var meta = await LoadDialogMetaAsync(folder);
         if (meta == null) return null;
 
-        var path = Path.Combine(folder, BuildFileName(FindFileIndex(meta, messageId)));
-        if (!File.Exists(path)) return null;
-
-        foreach (var line in await File.ReadAllLinesAsync(path))
+        await foreach (var msg in ReadMaterializedMessagesAsync(folder, meta, messageId))
         {
-            if (string.IsNullOrWhiteSpace(line)) continue;
-            var msg = JsonSerializer.Deserialize<ChatMessage>(line, s_jsonl);
-            if (msg?.Id == messageId) return msg;
+            if (msg.Id == messageId)
+                return msg;
         }
+
         return null;
+    }
+
+    public async Task<int?> GetLatestMessageIdAsync(Conversation conv)
+    {
+        var folder = GetFolder(conv);
+        var meta = await LoadDialogMetaAsync(folder);
+        return meta?.LastMessageId;
     }
 
     public async Task<List<ChatMessage>> GetLastMessagesWithUserNamesAsync(AppDbContext db, Conversation conv, int count = 50)
     {
         var (messages, _) = await GetMessagesAsync(conv, count);
-        foreach (var message in messages)
+
+        var authorIds = messages
+            .Select(message => message.AuthorId)
+            .Distinct()
+            .ToList();
+
+        var users = await db.Users
+            .AsNoTracking()
+            .Where(user => authorIds.Contains(user.Id))
+            .Select(user => new { user.Id, user.UserName, user.UserLogin })
+            .ToListAsync();
+
+        var userNames = users.ToDictionary(
+            user => user.Id,
+            user => user.UserName ?? user.UserLogin);
+
+        return messages.Select(message => new ChatMessage
         {
-            var user = await db.Users.FindAsync(message.AuthorId);
-            message.Text = user != null ? $"{user.UserName ?? user.UserLogin}: {message.Text}" : message.Text;
-        }
-        return messages;
+            Id = message.Id,
+            Type = message.Type,
+            AuthorId = message.AuthorId,
+            CreatedAt = message.CreatedAt,
+            Text = userNames.TryGetValue(message.AuthorId, out var userName)
+                ? $"{userName}: {message.Text}"
+                : message.Text,
+            Attachments = message.Attachments != null
+                ? [.. message.Attachments]
+                : [],
+            ReplyToMessageId = message.ReplyToMessageId,
+            EditedAt = message.EditedAt,
+            DeletedAt = message.DeletedAt
+        }).ToList();
     }
 
     private static async Task<DialogMeta?> LoadDialogMetaAsync(string folder)

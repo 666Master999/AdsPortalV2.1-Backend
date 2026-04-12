@@ -20,7 +20,7 @@ public class AdListItemDto
     public int UserId { get; set; }
     public int ViewsCount { get; set; }
     public int FavoritesCount { get; set; }
-    public string? MainImageUrl { get; set; }
+    public string? MainImagePath { get; set; }
     public bool IsFavorite { get; set; }
     public AdStatus? ModerationStatus { get; set; }
 }

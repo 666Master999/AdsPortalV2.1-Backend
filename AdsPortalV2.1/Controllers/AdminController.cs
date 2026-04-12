@@ -17,9 +17,9 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
 {
     [Authorize(Policy = AuthorizationPolicies.CanViewHiddenAd)]
     [HttpGet("ads")]
-    public async Task<IActionResult> GetAds([FromQuery] int skip = 0, [FromQuery] int take = 50, [FromQuery] string? status = null)
+    public async Task<ActionResult<PagedResultDto<AdminAdListItemDto>>> GetAds([FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] string? status = null)
     {
-        take = Math.Clamp(take, 1, 200);
+        pageSize = Math.Clamp(pageSize, 1, 50);
 
         var query = db.Ads.AsNoTracking();
         if (!string.IsNullOrWhiteSpace(status))
@@ -34,10 +34,12 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
         }
 
         var total = await query.CountAsync();
+        var totalPages = total == 0 ? 1 : (int)Math.Ceiling((double)total / pageSize);
+        page = Math.Min(page, totalPages);
         var ads = await query
             .OrderByDescending(a => a.CreatedAt)
-            .Skip(skip)
-            .Take(take)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
             .Select(a => new AdminAdListItemDto(
                 a.Id,
                 a.UserId,
@@ -61,20 +63,22 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
                 a.Images.OrderBy(img => img.SortOrder).Select(img => img.FilePath).FirstOrDefault()))
             .ToListAsync();
 
-        return Ok(new AdminAdsResultDto(total, ads));
+        return Ok(new PagedResultDto<AdminAdListItemDto>(ads, total, page, pageSize, totalPages));
     }
 
     [Authorize(Policy = "CanViewLogs")]
     [HttpGet("users")]
-    public async Task<IActionResult> GetUsers([FromQuery] int skip = 0, [FromQuery] int take = 50)
+    public async Task<ActionResult<PagedResultDto<UserDto>>> GetUsers([FromQuery] int page = 1, [FromQuery] int pageSize = 20)
     {
-        take = Math.Clamp(take, 1, 200);
+        pageSize = Math.Clamp(pageSize, 1, 50);
 
         var total = await db.Users.CountAsync();
+        var totalPages = total == 0 ? 1 : (int)Math.Ceiling((double)total / pageSize);
+        page = Math.Min(page, totalPages);
         var users = await db.Users.AsNoTracking()
             .OrderByDescending(u => u.CreatedAt)
-            .Skip(skip)
-            .Take(take)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
             .Select(u => new UserDto(
                 u.Id,
                 u.UserLogin,
@@ -87,33 +91,35 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
                 u.UserRoles.Select(ur => ur.Role.Name).ToList()))
             .ToListAsync();
 
-        return Ok(new AdminUsersResultDto(total, users));
+        return Ok(new PagedResultDto<UserDto>(users, total, page, pageSize, totalPages));
     }
 
     [Authorize(Policy = "CanViewLogs")]
     [HttpGet("logs")]
-    public async Task<IActionResult> GetLogs([FromQuery] int skip = 0, [FromQuery] int take = 50)
+    public async Task<ActionResult<PagedResultDto<AdminAuditLogDto>>> GetLogs([FromQuery] int page = 1, [FromQuery] int pageSize = 20)
     {
-        take = Math.Clamp(take, 1, 200);
+        pageSize = Math.Clamp(pageSize, 1, 50);
         var total = await db.AuditLogs.CountAsync();
+        var totalPages = total == 0 ? 1 : (int)Math.Ceiling((double)total / pageSize);
+        page = Math.Min(page, totalPages);
         var logs = await db.AuditLogs.AsNoTracking()
             .OrderByDescending(l => l.Timestamp)
-            .Skip(skip)
-            .Take(take)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
             .Select(l => new AdminAuditLogDto(l.Id, l.ActorUserId, l.TargetUserId, l.Action, l.TargetType, l.TargetId, l.Reason, l.OldValue, l.NewValue, l.Timestamp))
             .ToListAsync();
-        return Ok(new AdminLogsResultDto(total, logs));
+        return Ok(new PagedResultDto<AdminAuditLogDto>(logs, total, page, pageSize, totalPages));
     }
 
     [Authorize(Policy = AuthorizationPolicies.CanBanUser)]
     [HttpGet("restrictions/types")]
-    public IActionResult GetRestrictionTypes() => Ok(Enum.GetValues<RestrictionType>().Select(type => new RestrictionTypeDto(type.ToString(), type.ToString())).ToArray());
+    public ActionResult<IReadOnlyCollection<RestrictionTypeDto>> GetRestrictionTypes() => Ok(Enum.GetValues<RestrictionType>().Select(type => new RestrictionTypeDto(type.ToString(), type.ToString())).ToArray());
 
     // ?? Restrictions ??
 
     [Authorize(Policy = AuthorizationPolicies.CanBanUser)]
     [HttpPost("users/{id:int}/restrictions")]
-    public async Task<IActionResult> AddRestriction(int id, [FromBody] JsonElement body)
+    public async Task<ActionResult<RestrictionActionDto>> AddRestriction(int id, [FromBody] JsonElement body)
     {
         if (!User.TryGetUserId(out var actorId)) return Unauthorized();
 
@@ -178,7 +184,7 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
 
     [Authorize(Policy = "CanUnbanUser")]
     [HttpDelete("users/{id:int}/restrictions/{type}")]
-    public async Task<IActionResult> RemoveRestriction(int id, string type)
+    public async Task<ActionResult<RestrictionActionDto>> RemoveRestriction(int id, string type)
     {
         if (!User.TryGetUserId(out var actorId)) return Unauthorized();
 
@@ -211,7 +217,7 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
 
     [Authorize(Policy = "CanAssignRole")]
     [HttpPost("users/{id:int}/roles")]
-    public async Task<IActionResult> AssignRole(int id, [FromBody] RoleDto dto)
+    public async Task<ActionResult<RoleActionDto>> AssignRole(int id, [FromBody] RoleDto dto)
     {
         if (!User.TryGetUserId(out var actorId)) return Unauthorized();
 
@@ -246,7 +252,7 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
 
     [Authorize(Policy = "CanRevokeRole")]
     [HttpDelete("users/{id:int}/roles/{role}")]
-    public async Task<IActionResult> RevokeRole(int id, string role)
+    public async Task<ActionResult<RoleActionDto>> RevokeRole(int id, string role)
     {
         if (!User.TryGetUserId(out var actorId)) return Unauthorized();
 
@@ -279,18 +285,18 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
 
     [Authorize(Policy = AuthorizationPolicies.CanModerateAd)]
     [HttpPost("ads/{id:int}/approve")]
-    public async Task<IActionResult> ApproveAd(int id)
+    public async Task<ActionResult<AdStatusActionDto>> ApproveAd(int id, CancellationToken cancellationToken)
     {
         if (!User.TryGetUserId(out var actorId)) return Unauthorized();
 
-        var ad = await db.Ads.FindAsync(id);
+        var ad = await db.Ads.FirstOrDefaultAsync(a => a.Id == id, cancellationToken);
         if (ad == null) return NotFound();
 
         var actorName = await db.Users
             .AsNoTracking()
             .Where(u => u.Id == actorId)
             .Select(u => u.UserName ?? u.UserLogin)
-            .FirstAsync();
+            .FirstAsync(cancellationToken);
 
         var old = ad.Status;
         ad.Status = AdStatus.Active;
@@ -301,15 +307,16 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
 
         var notification = notificationFactory.CreateAdApproved(ad.UserId, ad.Id, ad.Title, actorName);
 
-        await db.SaveChangesAsync();
-        await notifications.SendAsync(notification);
+        await db.SaveChangesAsync(cancellationToken);
+
+        await notifications.SendAsync(notification, cancellationToken);
         events.Publish(new AdApproved(id, actorId));
         return Ok(new AdStatusActionDto(id, (AdStatus)ad.Status));
     }
 
     [Authorize(Policy = AuthorizationPolicies.CanModerateAd)]
     [HttpPost("ads/{id:int}/reject")]
-    public async Task<IActionResult> RejectAd(int id, [FromBody] JsonElement body)
+    public async Task<ActionResult<AdStatusActionDto>> RejectAd(int id, [FromBody] JsonElement body)
     {
         if (!User.TryGetUserId(out var actorId)) return Unauthorized();
 
@@ -342,7 +349,7 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
 
     [Authorize(Policy = AuthorizationPolicies.CanModerateAd)]
     [HttpPost("ads/{id:int}/send-to-moderation")]
-    public async Task<IActionResult> SendToModeration(int id)
+    public async Task<ActionResult<AdStatusActionDto>> SendToModeration(int id)
     {
         if (!User.TryGetUserId(out var actorId)) return Unauthorized();
 
@@ -359,7 +366,7 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
 
     [Authorize(Policy = AuthorizationPolicies.CanModerateAd)]
     [HttpDelete("ads/{id:int}")]
-    public async Task<IActionResult> SoftDeleteAd(int id)
+    public async Task<ActionResult<AdStatusActionDto>> SoftDeleteAd(int id)
     {
         if (!User.TryGetUserId(out var actorId)) return Unauthorized();
 
@@ -377,7 +384,7 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
 
     [Authorize(Policy = AuthorizationPolicies.CanModerateAd)]
     [HttpPost("ads/{id:int}/restore")]
-    public async Task<IActionResult> RestoreAd(int id)
+    public async Task<ActionResult<AdStatusActionDto>> RestoreAd(int id)
     {
         if (!User.TryGetUserId(out var actorId)) return Unauthorized();
 
@@ -395,7 +402,7 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
 
     [Authorize(Policy = AuthorizationPolicies.CanModerateAd)]
     [HttpDelete("ads/{id:int}/hard")]
-    public async Task<IActionResult> HardDeleteAd(int id)
+    public async Task<ActionResult<AdStatusActionDto>> HardDeleteAd(int id)
     {
         if (!User.TryGetUserId(out var actorId)) return Unauthorized();
 

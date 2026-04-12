@@ -10,6 +10,7 @@ public interface IAdImagePatchService
         Ad ad,
         JsonElement raw,
         ICollection<string> updated,
-        ICollection<string> skipped,
-        ICollection<PatchErrorDto> errors);
+        ICollection<PatchIssueDto> skipped,
+        ICollection<PatchIssueDto> errors);
+
 }

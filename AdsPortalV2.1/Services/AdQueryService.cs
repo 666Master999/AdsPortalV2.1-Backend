@@ -56,7 +56,7 @@ public class AdQueryService(AppDbContext db, IMemoryCache cache)
         return query;
     }
 
-    public async Task<HashSet<int>> GetFavoriteIdsAsync(int? currentUserId, IEnumerable<int> adIds)
+    public async Task<HashSet<int>> GetFavoriteIdsAsync(int? currentUserId, IEnumerable<int> adIds, CancellationToken cancellationToken = default)
     {
         if (!currentUserId.HasValue)
             return [];
@@ -69,7 +69,7 @@ public class AdQueryService(AppDbContext db, IMemoryCache cache)
             .AsNoTracking()
             .Where(f => f.UserId == currentUserId.Value && ids.Contains(f.AdId))
             .Select(f => f.AdId)
-            .ToHashSetAsync();
+            .ToHashSetAsync(cancellationToken);
     }
 
     private async Task<HashSet<int>> ExpandLocationIdsAsync(int[] ids)

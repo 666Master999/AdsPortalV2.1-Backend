@@ -4,47 +4,48 @@ namespace AdsPortalV2.Models;
 
 public static class PatchHelpers
 {
+    public const int MaxStringLength = 100;
+
     public static void UpdateString(
         JsonElement raw,
         string currentValue,
         Action<string> setter,
         string fieldName,
         ICollection<string> updated,
-        ICollection<string> skipped,
-        ICollection<PatchErrorDto> errors,
-        bool required = false)
+        ICollection<PatchIssueDto> skipped,
+        ICollection<PatchIssueDto> errors)
     {
         if (raw.ValueKind is JsonValueKind.Undefined)
             return;
 
         if (raw.ValueKind is JsonValueKind.Null)
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be null."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be null."));
             return;
         }
 
         if (raw.ValueKind is not JsonValueKind.String)
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} must be a string."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} must be a string."));
             return;
         }
 
         var value = raw.GetString()?.Trim();
-        if (required && string.IsNullOrWhiteSpace(value))
-        {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be empty."));
-            return;
-        }
-
         if (string.IsNullOrWhiteSpace(value))
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be empty."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be empty."));
             return;
         }
 
-        if (string.Equals(value, currentValue, StringComparison.OrdinalIgnoreCase))
+        if (value.Length > MaxStringLength)
         {
-            skipped.Add(fieldName);
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} is too long."));
+            return;
+        }
+
+        if (string.Equals(value, currentValue, StringComparison.Ordinal))
+        {
+            skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, fieldName, $"{fieldName} not changed."));
             return;
         }
 
@@ -58,12 +59,12 @@ public static class PatchHelpers
         Action<int> setter,
         string fieldName,
         ICollection<string> updated,
-        ICollection<string> skipped,
-        ICollection<PatchErrorDto> errors)
+        ICollection<PatchIssueDto> skipped,
+        ICollection<PatchIssueDto> errors)
     {
         if (value == currentValue)
         {
-            skipped.Add(fieldName);
+            skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, fieldName, $"{fieldName} not changed."));
             return;
         }
 
@@ -77,10 +78,9 @@ public static class PatchHelpers
         Action<string?> setter,
         string fieldName,
         ICollection<string> updated,
-        ICollection<string> skipped,
-        ICollection<PatchErrorDto> errors,
-        bool allowNull = true,
-        bool required = false)
+        ICollection<PatchIssueDto> skipped,
+        ICollection<PatchIssueDto> errors,
+        bool allowNull = true)
     {
         if (raw.ValueKind is JsonValueKind.Undefined)
             return;
@@ -89,13 +89,13 @@ public static class PatchHelpers
         {
             if (!allowNull)
             {
-                errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be null."));
+                errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be null."));
                 return;
             }
 
             if (currentValue is null)
             {
-                skipped.Add(fieldName);
+                skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, fieldName, $"{fieldName} not changed."));
                 return;
             }
 
@@ -106,20 +106,34 @@ public static class PatchHelpers
 
         if (raw.ValueKind is not JsonValueKind.String)
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} must be a string."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} must be a string."));
             return;
         }
 
         var value = raw.GetString()?.Trim();
-        if (required && string.IsNullOrWhiteSpace(value))
+
+        if (string.IsNullOrWhiteSpace(value))
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be empty."));
+            if (currentValue is null)
+            {
+                skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, fieldName, $"{fieldName} not changed."));
+                return;
+            }
+
+            setter(null);
+            updated.Add(fieldName);
             return;
         }
 
-        if (string.Equals(value, currentValue, StringComparison.OrdinalIgnoreCase))
+        if (value.Length > MaxStringLength)
         {
-            skipped.Add(fieldName);
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} is too long."));
+            return;
+        }
+
+        if (string.Equals(value, currentValue, StringComparison.Ordinal))
+        {
+            skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, fieldName, $"{fieldName} not changed."));
             return;
         }
 
@@ -133,27 +147,27 @@ public static class PatchHelpers
         Action<int> setter,
         string fieldName,
         ICollection<string> updated,
-        ICollection<string> skipped,
-        ICollection<PatchErrorDto> errors)
+        ICollection<PatchIssueDto> skipped,
+        ICollection<PatchIssueDto> errors)
     {
         if (raw.ValueKind is JsonValueKind.Undefined)
             return;
 
         if (raw.ValueKind is JsonValueKind.Null)
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be null."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be null."));
             return;
         }
 
         if (!raw.TryGetInt32(out var value))
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} must be an integer."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} must be an integer."));
             return;
         }
 
         if (value == currentValue)
         {
-            skipped.Add(fieldName);
+            skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, fieldName, $"{fieldName} not changed."));
             return;
         }
 
@@ -167,8 +181,8 @@ public static class PatchHelpers
         Action<int?> setter,
         string fieldName,
         ICollection<string> updated,
-        ICollection<string> skipped,
-        ICollection<PatchErrorDto> errors,
+        ICollection<PatchIssueDto> skipped,
+        ICollection<PatchIssueDto> errors,
         bool allowNull = true)
     {
         if (raw.ValueKind is JsonValueKind.Undefined)
@@ -178,13 +192,13 @@ public static class PatchHelpers
         {
             if (!allowNull)
             {
-                errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be null."));
+                errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be null."));
                 return;
             }
 
             if (currentValue is null)
             {
-                skipped.Add(fieldName);
+                skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, fieldName, $"{fieldName} not changed."));
                 return;
             }
 
@@ -195,13 +209,13 @@ public static class PatchHelpers
 
         if (!raw.TryGetInt32(out var value))
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} must be an integer."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} must be an integer."));
             return;
         }
 
         if (EqualityComparer<int?>.Default.Equals(value, currentValue))
         {
-            skipped.Add(fieldName);
+            skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, fieldName, $"{fieldName} not changed."));
             return;
         }
 
@@ -215,27 +229,27 @@ public static class PatchHelpers
         Action<decimal> setter,
         string fieldName,
         ICollection<string> updated,
-        ICollection<string> skipped,
-        ICollection<PatchErrorDto> errors)
+        ICollection<PatchIssueDto> skipped,
+        ICollection<PatchIssueDto> errors)
     {
         if (raw.ValueKind is JsonValueKind.Undefined)
             return;
 
         if (raw.ValueKind is JsonValueKind.Null)
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be null."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be null."));
             return;
         }
 
         if (!raw.TryGetDecimal(out var value))
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} must be a decimal."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} must be a decimal."));
             return;
         }
 
         if (value == currentValue)
         {
-            skipped.Add(fieldName);
+            skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, fieldName, $"{fieldName} not changed."));
             return;
         }
 
@@ -249,8 +263,8 @@ public static class PatchHelpers
         Action<decimal?> setter,
         string fieldName,
         ICollection<string> updated,
-        ICollection<string> skipped,
-        ICollection<PatchErrorDto> errors,
+        ICollection<PatchIssueDto> skipped,
+        ICollection<PatchIssueDto> errors,
         bool allowNull = true)
     {
         if (raw.ValueKind is JsonValueKind.Undefined)
@@ -260,13 +274,13 @@ public static class PatchHelpers
         {
             if (!allowNull)
             {
-                errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be null."));
+                errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be null."));
                 return;
             }
 
             if (currentValue is null)
             {
-                skipped.Add(fieldName);
+                skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, fieldName, $"{fieldName} not changed."));
                 return;
             }
 
@@ -277,13 +291,13 @@ public static class PatchHelpers
 
         if (!raw.TryGetDecimal(out var value))
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} must be a decimal."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} must be a decimal."));
             return;
         }
 
         if (EqualityComparer<decimal?>.Default.Equals(value, currentValue))
         {
-            skipped.Add(fieldName);
+            skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, fieldName, $"{fieldName} not changed."));
             return;
         }
 
@@ -297,28 +311,28 @@ public static class PatchHelpers
         Action<bool> setter,
         string fieldName,
         ICollection<string> updated,
-        ICollection<string> skipped,
-        ICollection<PatchErrorDto> errors)
+        ICollection<PatchIssueDto> skipped,
+        ICollection<PatchIssueDto> errors)
     {
         if (raw.ValueKind is JsonValueKind.Undefined)
             return;
 
         if (raw.ValueKind is JsonValueKind.Null)
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be null."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be null."));
             return;
         }
 
         if (raw.ValueKind is not JsonValueKind.True and not JsonValueKind.False)
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} must be a boolean."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} must be a boolean."));
             return;
         }
 
         var value = raw.GetBoolean();
         if (value == currentValue)
         {
-            skipped.Add(fieldName);
+            skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, fieldName, $"{fieldName} not changed."));
             return;
         }
 
@@ -332,8 +346,8 @@ public static class PatchHelpers
         Action<bool?> setter,
         string fieldName,
         ICollection<string> updated,
-        ICollection<string> skipped,
-        ICollection<PatchErrorDto> errors,
+        ICollection<PatchIssueDto> skipped,
+        ICollection<PatchIssueDto> errors,
         bool allowNull = true)
     {
         if (raw.ValueKind is JsonValueKind.Undefined)
@@ -343,13 +357,13 @@ public static class PatchHelpers
         {
             if (!allowNull)
             {
-                errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be null."));
+                errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} cannot be null."));
                 return;
             }
 
             if (currentValue is null)
             {
-                skipped.Add(fieldName);
+                skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, fieldName, $"{fieldName} not changed."));
                 return;
             }
 
@@ -360,14 +374,14 @@ public static class PatchHelpers
 
         if (raw.ValueKind is not JsonValueKind.True and not JsonValueKind.False)
         {
-            errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} must be a boolean."));
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, fieldName, $"{fieldName} must be a boolean."));
             return;
         }
 
         var value = raw.GetBoolean();
         if (EqualityComparer<bool?>.Default.Equals(value, currentValue))
         {
-            skipped.Add(fieldName);
+            skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, fieldName, $"{fieldName} not changed."));
             return;
         }
 

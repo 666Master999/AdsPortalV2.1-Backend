@@ -18,16 +18,18 @@ public class ConversationsController(
     AppDbContext db,
     DialogWriterService writer,
     DialogReaderService reader,
-    ImageService imageService,
+    MessageFlowService messageFlow,
+    ConversationService conversationService,
+    IConversationRepository conversations,
+    IUserRepository userRepository,
     IWebHostEnvironment env,
-    OnlineUserTracker tracker,
-    IHubContext<OnlineHub> onlineHub,
-    IHubContext<NotificationHub> notificationHub,
+    IHubContext<ChatHub> onlineHub,
+    IHubContext<SystemNotificationHub> notificationHub,
     PermissionService perms,
     ILogger<ConversationsController> logger) : ControllerBase
 {
     [HttpPost]
-    public async Task<IActionResult> Create([FromBody] CreateConversationRequest req)
+    public async Task<ActionResult<ConversationActionDto>> Create([FromBody] CreateConversationRequest req)
     {
         if (!User.TryGetUserId(out var buyerId)) return Unauthorized();
 
@@ -35,7 +37,7 @@ public class ConversationsController(
         if (await perms.HasActiveRestrictionAsync(buyerId, RestrictionType.ChatBan))
             return StatusCode(403, new ApiError("chat_banned", "You cannot send messages"));
 
-        var ad = await db.Ads.AsNoTracking().FirstOrDefaultAsync(a => a.Id == req.AdId);
+        var ad = await conversations.GetAdByIdAsync(req.AdId);
         if (ad == null) return NotFound();
 
         if (await IsBlockedBidirectionalAsync(buyerId, ad.UserId))
@@ -44,8 +46,7 @@ public class ConversationsController(
         if (ad.UserId == buyerId)
             return BadRequest(new ApiError("validation_error", "Нельзя написать самому себе."));
 
-        var existing = await db.Conversations.AsNoTracking()
-            .FirstOrDefaultAsync(c => c.AdId == req.AdId && c.BuyerId == buyerId);
+        var existing = await conversations.FindByAdAndBuyerAsync(req.AdId, buyerId);
         if (existing != null)
         {
             var existingDto = await LoadConversationDtoAsync(existing.Id, buyerId);
@@ -59,13 +60,11 @@ public class ConversationsController(
             BuyerId = buyerId
         };
 
-        db.Conversations.Add(conv);
-        await db.SaveChangesAsync();
+        await conversations.AddConversationAsync(conv);
+        await conversations.SaveChangesAsync();
 
         conv.DialogFolderPath = $"files/{ad.UserId}/Ads/{ad.Id}/dialogs/{conv.Id}";
-        await db.SaveChangesAsync();
-        Directory.CreateDirectory(Path.Combine(env.WebRootPath ?? "wwwroot", conv.DialogFolderPath));
-        Directory.CreateDirectory(Path.Combine(env.WebRootPath ?? "wwwroot", conv.DialogFolderPath, "attachments"));
+        await conversations.SaveChangesAsync();
 
         var buyerDto = await LoadConversationDtoAsync(conv.Id, buyerId);
         var sellerDto = conv.SellerId == conv.BuyerId ? buyerDto : await LoadConversationDtoAsync(conv.Id, conv.SellerId);
@@ -76,16 +75,10 @@ public class ConversationsController(
         // realtime: уведомим участников (buyer и seller) о новом диалоге
         try
         {
-            // send to user groups (group-based) as well as to User identifier as fallback
-            await notificationHub.Clients.Group($"user:{conv.SellerId}").SendAsync("chat:conversationCreated", sellerDto);
-            await onlineHub.Clients.Group($"user:{conv.SellerId}").SendAsync("chat:conversationCreated", sellerDto);
-            await notificationHub.Clients.User(conv.SellerId.ToString()).SendAsync("chat:conversationCreated", sellerDto);
+            // send to onlineHub for conversation realtime updates
+            await onlineHub.Clients.Group($"conversation:{conv.Id}").SendAsync(HubEvents.ConversationCreated, sellerDto);
             if (conv.BuyerId != conv.SellerId)
-            {
-                await notificationHub.Clients.Group($"user:{conv.BuyerId}").SendAsync("chat:conversationCreated", buyerDto);
-                await onlineHub.Clients.Group($"user:{conv.BuyerId}").SendAsync("chat:conversationCreated", buyerDto);
-                await notificationHub.Clients.User(conv.BuyerId.ToString()).SendAsync("chat:conversationCreated", buyerDto);
-            }
+                await onlineHub.Clients.Group($"conversation:{conv.Id}").SendAsync(HubEvents.ConversationCreated, buyerDto);
         }
         catch (Exception ex)
         {
@@ -95,23 +88,38 @@ public class ConversationsController(
         return Ok(new ConversationActionDto(conv.Id, "created", buyerDto));
     }
 
+    // Consolidated helper to upload attachments and create/send message for a given conversation
+    private async Task<ActionResult<ConversationMessageActionDto>> UploadAttachmentsToConversationAsync(Conversation conv, int userId, IFormFileCollection files, string? text, int? replyToMessageId)
+    {
+        var contentText = text;
+        var hasFiles = files.Count > 0;
+        if (string.IsNullOrWhiteSpace(contentText) && Request.HasFormContentType)
+            contentText = Request.Form["caption"].FirstOrDefault();
+
+        if (string.IsNullOrWhiteSpace(contentText) && !hasFiles && replyToMessageId == null)
+            return BadRequest(new ApiError("validation_error", "Empty message body"));
+
+        if (!hasFiles)
+            return await CreateAndSendMessage(conv.Id, userId, MessageType.Text, contentText, replyToMessageId);
+
+        var fileValidationError = messageFlow.ValidateAttachments(files);
+        if (fileValidationError != null)
+            return BadRequest(new ApiError("validation_error", fileValidationError));
+
+        var attachments = await Task.WhenAll(files.Select(f => messageFlow.SaveAttachmentAsync(conv, f)));
+        var type = attachments.All(a => a.Type == MessageType.Image) ? MessageType.Image : MessageType.File;
+        return await CreateAndSendMessage(conv.Id, userId, type, contentText, replyToMessageId, attachments);
+    }
+
     [HttpGet]
-    public async Task<IActionResult> List()
+    public async Task<ActionResult<IReadOnlyCollection<ConversationDto>>> List()
     {
         if (!User.TryGetUserId(out var userId)) return Unauthorized();
 
-        var conversations = await db.Conversations
-            .AsNoTracking()
-            .Where(c => c.SellerId == userId || c.BuyerId == userId)
-            .Include(c => c.Ad).ThenInclude(a => a.Images) // Ensure Ad data is included
-            .Include(c => c.Seller) // Ensure Seller data is included
-            .Include(c => c.Buyer) // Ensure Buyer data is included
-            .OrderByDescending(c => c.LastMessageTimestamp)
-            .ToListAsync();
+        var convs = await conversations.GetForUserAsync(userId);
+        convs = convs.Where(c => !IsBlockedBidirectional(c.SellerId, c.BuyerId)).ToList();
 
-        conversations = [.. conversations.Where(c => !IsBlockedBidirectional(c.SellerId, c.BuyerId))];
-
-        var list = await Task.WhenAll(conversations.Select(async c =>
+        var list = await Task.WhenAll(convs.Select(async c =>
         {
             var (Count, FirstUnreadMessageId) = await writer.GetUnreadStateAsync(c, userId);
             return c.ToDto(userId, Count, FirstUnreadMessageId);
@@ -121,24 +129,19 @@ public class ConversationsController(
     }
 
     [HttpGet("{id:int}/messages")]
-    public async Task<IActionResult> GetMessages(int id, [FromQuery] int count = 10, [FromQuery] int? before = null, [FromQuery] int? since = null)
+    public async Task<ActionResult<ConversationMessagesDto>> GetMessages(int id, [FromQuery] int count = 10, [FromQuery] int? before = null, [FromQuery] int? since = null)
     {
         if (!User.TryGetUserId(out var userId)) return Unauthorized();
 
         var isInitialLoad = before == null && since == null;
 
         var conv = isInitialLoad
-            ? await db.Conversations.AsNoTracking()
-                .Include(c => c.Ad).ThenInclude(a => a.Images)
-                .Include(c => c.Seller).Include(c => c.Buyer)
-                .FirstOrDefaultAsync(c => c.Id == id)
-            : await db.Conversations.AsNoTracking()
-                .FirstOrDefaultAsync(c => c.Id == id);
+            ? await conversations.GetByIdAsync(id, includeDetails: true, asNoTracking: true)
+            : await conversations.GetByIdAsync(id, includeDetails: false, asNoTracking: true);
 
         if (conv == null) return NotFound();
-        if (!conv.IsParticipant(userId)) return Forbid();
-        if (IsBlockedBidirectional(conv.SellerId, conv.BuyerId))
-            return StatusCode(403, new ApiError("forbidden", "Диалог недоступен."));
+        var accessResult = await EnsureCanAccessConversationAsync(userId, conv);
+        if (accessResult != null) return (ActionResult<ConversationMessagesDto>)accessResult;
 
         List<ChatMessage> messages;
         bool hasMore;
@@ -169,71 +172,102 @@ public class ConversationsController(
             }
         }
 
-        var userList = await db.Users
-            .Where(u => messages.Select(m => m.AuthorId).Distinct().Contains(u.Id))
-            .Select(u => new { u.Id, u.UserName, u.UserLogin, u.AvatarPath })
-            .ToListAsync();
+        var authorIds = messages
+            .Select(m => m.AuthorId)
+            .Distinct()
+            .ToList();
 
-        var users = userList.ToDictionary(u => u.Id, u => new MessageAuthorDto(u.UserName, u.UserLogin, u.AvatarPath));
+        var userList = await userRepository.GetByIdsAsync(authorIds);
+        var users = userList.ToDictionary(u => u.Id, u => new MessageAuthorDto(u.Id, u.UserName, u.UserLogin, u.AvatarPath));
 
         var enrichedMessages = messages.Select(m =>
         {
-            var author = users.GetValueOrDefault(m.AuthorId);
-            return new ConversationMessageDto(
-                id,
-                m.Id,
-                m.Type,
-                m.AuthorId,
-                author == null ? null : new MessageAuthorDto(author.UserName, author.UserLogin, author.AvatarPath),
-                m.CreatedAt,
-                m.Text,
-                m.Attachments ?? [],
-                m.ReplyToMessageId,
-                m.EditedAt,
-                m.DeletedAt);
+            if (!users.TryGetValue(m.AuthorId, out var author))
+            {
+                logger.LogWarning(
+                    "Missing author in DB. ConversationId={ConversationId}, MessageId={MessageId}, AuthorId={AuthorId}",
+                    id,
+                    m.Id,
+                    m.AuthorId
+                );
+                author = new MessageAuthorDto(m.AuthorId, null, "[deleted]", null);
+            }
+
+            return BuildConversationMessageDto(id, m, author);
         }).ToList();
-
-        if (!isInitialLoad)
-            return Ok(new ConversationMessagesChunkDto(enrichedMessages, hasMore));
-
-        var opponentId = conv.SellerId == userId ? conv.BuyerId : conv.SellerId;
-        var myLastSeenMessageId = anchorMessageId;
-        var otherLastSeenMessageId = await writer.GetLastSeenMessageIdAsync(conv, opponentId);
-
-        var me = conv.SellerId == userId ? conv.Seller : conv.Buyer;
-        var opponent = conv.SellerId == userId ? conv.Buyer : conv.Seller;
 
         // при initial load пометим сообщения как прочитанные для текущего пользователя,
         // чтобы счётчик непрочитанных синхронизировался сразу при открытии диалога
         if (isInitialLoad && messages.Count > 0)
         {
-            var lastMsgId = messages.Last().Id;
+            var lastMsgId = await reader.GetLatestMessageIdAsync(conv) ?? messages.Max(m => m.Id);
             await writer.MarkAsReadAsync(conv.Id, userId, lastMsgId);
         }
 
-        var conversationMeta = new ConversationMetaDto(
-            conv.Id,
-            conv.AdId,
-            new ConversationAdMetaDto(
-                conv.Ad.Id,
-                conv.Ad.Title,
-                conv.Ad.Price,
-                conv.Ad.CreatedAt,
-                conv.Ad.Status,
-                conv.Ad.Images.FirstOrDefault(img => img.Id == conv.Ad.MainImageId)?.FilePath),
-            new ConversationUserPresenceDto(me.Id, me.UserName, me.UserLogin, me.AvatarPath, me.LastActivityAt, tracker.IsOnline(userId)),
-            new ConversationUserPresenceDto(opponent.Id, opponent.UserName, opponent.UserLogin, opponent.AvatarPath, opponent.LastActivityAt, tracker.IsOnline(opponentId)),
-            conv.CreatedAt,
-            conv.IsClosed,
-            conv.LastMessageText);
+        var conversation = await LoadConversationDtoAsync(conv.Id, userId);
+        if (conversation == null) return NotFound();
 
-        return Ok(new ConversationInitialDto(conversationMeta, enrichedMessages, hasMore, anchorMessageId, myLastSeenMessageId, otherLastSeenMessageId));
+        var opponentId = conv.SellerId == userId ? conv.BuyerId : conv.SellerId;
+        var myLastSeenMessageId = anchorMessageId;
+        var otherLastSeenMessageId = await writer.GetLastSeenMessageIdAsync(conv, opponentId);
+
+        return Ok(new ConversationMessagesDto(conversation, enrichedMessages, hasMore, anchorMessageId, myLastSeenMessageId, otherLastSeenMessageId));
+    }
+
+    // Helper: build ConversationMessageDto from internal ChatMessage (delegates to DialogHelpers)
+    private ConversationMessageDto BuildConversationMessageDto(int conversationId, ChatMessage msg, MessageAuthorDto? author)
+        => DialogHelpers.ToConversationMessageDto(conversationId, msg, author);
+
+    private async Task<MessageAuthorDto> GetAuthorDtoAsync(int authorId)
+    {
+        var a = await db.Users.AsNoTracking()
+            .Where(u => u.Id == authorId)
+            .Select(u => new { u.Id, u.UserName, u.UserLogin, u.AvatarPath })
+            .FirstOrDefaultAsync();
+
+        if (a == null) return new MessageAuthorDto(authorId, null, "[deleted]", null);
+        return new MessageAuthorDto(a.Id, a.UserName, a.UserLogin, a.AvatarPath);
+    }
+
+    // Consolidated helper: build DTO, send realtime notification(s) and return ActionResult
+    private async Task<ActionResult<ConversationMessageActionDto>> SendMessageAndNotifyAsync(int conversationId, ChatMessage msg, MessageAuthorDto? author = null)
+    {
+        var authorDto = author ?? await GetAuthorDtoAsync(msg.AuthorId);
+        var convMessage = BuildConversationMessageDto(conversationId, msg, authorDto);
+        var action = new ConversationMessageActionDto(conversationId, convMessage);
+        try
+        {
+            await notificationHub.Clients.Group($"conversation:{conversationId}").SendAsync(HubEvents.Message, convMessage);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to send realtime notification for conversation {ConvId}", conversationId);
+        }
+
+        try
+        {
+            await onlineHub.Clients.Group($"conversation:{conversationId}").SendAsync(HubEvents.Message, convMessage);
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Failed to send onlineHub realtime notification for conversation {ConvId}", conversationId);
+        }
+
+        return Ok(action);
+    }
+
+    // Consolidated helper to enqueue a message and send realtime notifications
+    private async Task<ActionResult<ConversationMessageActionDto>> CreateAndSendMessage(int conversationId, int userId, MessageType type, string? text, int? replyToMessageId, IEnumerable<ChatAttachment>? attachments = null, string? clientTag = null)
+    {
+        var list = attachments?.ToList();
+        var msg = await writer.EnqueueAsync(conversationId, userId, type, text, replyToMessageId, list, clientTag);
+        return await SendMessageAndNotifyAsync(conversationId, msg);
     }
 
     [HttpPost("{id:int}/messages")]
     [EnableRateLimiting("MessagesPerSecond")]
     [Consumes("application/json")]
-    public async Task<IActionResult> SendMessage(int id, [FromBody] SendMessageRequest req)
+    public async Task<ActionResult<ConversationMessageActionDto>> SendMessage(int id, [FromBody] SendMessageRequest req)
     {
         if (!User.TryGetUserId(out var userId)) return Unauthorized();
 
@@ -241,25 +275,24 @@ public class ConversationsController(
         if (await perms.HasActiveRestrictionAsync(userId, RestrictionType.ChatBan))
             return StatusCode(403, new ApiError("chat_banned", "You cannot send messages"));
 
-        var conv = await db.Conversations.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id);
+        var conv = await conversations.GetByIdAsync(id, includeDetails: false, asNoTracking: true);
         if (conv == null) return NotFound();
-        if (!conv.IsParticipant(userId)) return Forbid();
-        if (await IsBlockedBidirectionalAsync(conv.SellerId, conv.BuyerId))
-            return StatusCode(403, new ApiError("forbidden", "Диалог недоступен."));
+        var accessResult = await EnsureCanAccessConversationAsync(userId, conv);
+        if (accessResult != null) return accessResult;
 
         if (string.IsNullOrWhiteSpace(req.Text) && req.ReplyToMessageId == null && req.Type == MessageType.Text)
             return BadRequest(new ApiError("validation_error", "Empty message body"));
 
-        var msg = await writer.EnqueueAsync(id, userId, req.Type, req.Text, req.ReplyToMessageId);
-        return Ok(new ConversationMessageActionDto(id, msg));
+        // ClientTag is part of SendMessageRequest DTO — use it directly
+        return await CreateAndSendMessage(id, userId, req.Type, req.Text, req.ReplyToMessageId, null, req.ClientTag);
     }
 
-    [HttpPost("{id:int}/messages")]
+    [HttpPost("{id:int}/messages/upload")]
     [EnableRateLimiting("MessagesPerSecond")]
     [Consumes("multipart/form-data")]
     [DisableRequestSizeLimit]
     [RequestFormLimits(MultipartBodyLengthLimit = 200_000_000)]
-    public async Task<IActionResult> SendMessage(int id, [FromForm] string? text, [FromForm] int? replyToMessageId, [FromForm] List<IFormFile>? files)
+    public async Task<ActionResult<ConversationMessageActionDto>> SendMessage(int id, [FromForm] string? text, [FromForm] int? replyToMessageId, [FromForm(Name = "files")] IFormFileCollection files, [FromForm] string? clientTag)
     {
         if (!User.TryGetUserId(out var userId)) return Unauthorized();
 
@@ -267,72 +300,54 @@ public class ConversationsController(
         if (await perms.HasActiveRestrictionAsync(userId, RestrictionType.ChatBan))
             return StatusCode(403, new ApiError("chat_banned", "You cannot send messages"));
 
-        var conv = await db.Conversations.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id);
+        var conv = await conversations.GetByIdAsync(id, includeDetails: false, asNoTracking: true);
         if (conv == null) return NotFound();
-        if (!conv.IsParticipant(userId)) return Forbid();
-        if (await IsBlockedBidirectionalAsync(conv.SellerId, conv.BuyerId))
-            return StatusCode(403, new ApiError("forbidden", "Диалог недоступен."));
+        var accessResult = await EnsureCanAccessConversationAsync(userId, conv);
+        if (accessResult != null) return accessResult;
 
         // Some clients send the text
         var contentText = text;
         if (string.IsNullOrWhiteSpace(contentText) && Request.HasFormContentType)
             contentText = Request.Form["caption"].FirstOrDefault();
 
-        var hasFiles = files is { Count: > 0 };
+        var hasFiles = files.Count > 0;
         if (string.IsNullOrWhiteSpace(contentText) && !hasFiles && replyToMessageId == null)
             return BadRequest(new ApiError("validation_error", "Empty message body"));
 
         if (!hasFiles)
-        {
-            var message = await writer.EnqueueAsync(id, userId, MessageType.Text, contentText, replyToMessageId);
-            return Ok(new ConversationMessageActionDto(id, message));
-        }
+            return await CreateAndSendMessage(id, userId, MessageType.Text, contentText, replyToMessageId, null, clientTag);
 
-        var attachments = await Task.WhenAll(files!.Select(f => SaveAttachmentAsync(conv, f)));
-        var type = attachments.All(a => a.Type == nameof(MessageType.Image)) ? MessageType.Image : MessageType.File;
-        var msg = await writer.EnqueueAsync(id, userId, type, contentText, replyToMessageId, [.. attachments]);
-        return Ok(new ConversationMessageActionDto(id, msg));
+        var fileValidationError = messageFlow.ValidateAttachments(files);
+        if (fileValidationError != null)
+            return BadRequest(new ApiError("validation_error", fileValidationError));
+
+        var attachments = await Task.WhenAll(files.Select(f => messageFlow.SaveAttachmentAsync(conv, f)));
+        var type = attachments.All(a => a.Type == MessageType.Image) ? MessageType.Image : MessageType.File;
+        return await CreateAndSendMessage(id, userId, type, contentText, replyToMessageId, attachments, clientTag);
     }
 
     [HttpPost("by-ad/{adId:int}/messages")]
     [EnableRateLimiting("MessagesPerSecond")]
     [Consumes("application/json")]
-    public async Task<IActionResult> SendMessageByAd(int adId, [FromBody] SendMessageRequest req)
+    public async Task<ActionResult<ConversationMessageActionDto>> SendMessageByAd(int adId, [FromBody] SendMessageRequest req)
     {
         if (!User.TryGetUserId(out var buyerId)) return Unauthorized();
-        if (await perms.HasActiveRestrictionAsync(buyerId, RestrictionType.ChatBan))
-            return StatusCode(403, new ApiError("chat_banned", "You cannot send messages"));
-        var conv = await GetOrCreateByAdAsync(adId, buyerId);
-        if (conv == null) return NotFound();
-        var msg = await writer.EnqueueAsync(conv.Id, buyerId, req.Type, req.Text, req.ReplyToMessageId);
-        return Ok(new ConversationMessageActionDto(conv.Id, msg));
+        return await CreateAndSendMessageByAdAsync(adId, buyerId, req.Type, req.Text, req.ReplyToMessageId);
     }
 
-    [HttpPost("by-ad/{adId:int}/messages")]
+    [HttpPost("by-ad/{adId:int}/messages/upload")]
     [EnableRateLimiting("MessagesPerSecond")]
     [Consumes("multipart/form-data")]
     [DisableRequestSizeLimit]
     [RequestFormLimits(MultipartBodyLengthLimit = 200_000_000)]
-    public async Task<IActionResult> SendMessageByAd(int adId, [FromForm] string? text, [FromForm] int? replyToMessageId, [FromForm] List<IFormFile>? files)
+    public async Task<ActionResult<ConversationMessageActionDto>> SendMessageByAd(int adId, [FromForm] string? text, [FromForm] int? replyToMessageId, [FromForm(Name = "files")] IFormFileCollection files)
     {
         if (!User.TryGetUserId(out var buyerId)) return Unauthorized();
-        if (await perms.HasActiveRestrictionAsync(buyerId, RestrictionType.ChatBan))
-            return StatusCode(403, new ApiError("chat_banned", "You cannot send messages"));
-        var conv = await GetOrCreateByAdAsync(adId, buyerId);
-        if (conv == null) return NotFound();
-        var contentText = string.IsNullOrWhiteSpace(text) ? Request.Form["caption"].FirstOrDefault() : text;
-        var hasFiles = files is { Count: > 0 };
-        if (string.IsNullOrWhiteSpace(contentText) && !hasFiles && replyToMessageId == null)
-            return BadRequest(new ApiError("validation_error", "Empty message body"));
-        if (!hasFiles)
-            return Ok(new ConversationMessageActionDto(conv.Id, await writer.EnqueueAsync(conv.Id, buyerId, MessageType.Text, contentText, replyToMessageId)));
-        var attachments = await Task.WhenAll(files!.Select(f => SaveAttachmentAsync(conv, f)));
-        var type = attachments.All(a => a.Type == nameof(MessageType.Image)) ? MessageType.Image : MessageType.File;
-        return Ok(new ConversationMessageActionDto(conv.Id, await writer.EnqueueAsync(conv.Id, buyerId, type, contentText, replyToMessageId, [.. attachments])));
+        return await UploadAttachmentsByAdAsync(adId, buyerId, files, text, replyToMessageId);
     }
 
     [HttpPatch("{id:int}/read")]
-    public async Task<IActionResult> MarkAsRead(int id, [FromQuery] int? lastSeenMessageId)
+    public async Task<ActionResult> MarkAsRead(int id, [FromQuery] int? lastSeenMessageId)
     {
         if (!User.TryGetUserId(out var userId)) return Unauthorized();
 
@@ -340,9 +355,8 @@ public class ConversationsController(
 
         var conv = await db.Conversations.FindAsync(id);
         if (conv == null) return NotFound();
-        if (!conv.IsParticipant(userId)) return Forbid();
-        if (IsBlockedBidirectional(conv.SellerId, conv.BuyerId))
-            return StatusCode(403, new ApiError("forbidden", "Диалог недоступен."));
+        var accessResult = await EnsureCanAccessConversationAsync(userId, conv);
+        if (accessResult != null) return accessResult;
 
         await writer.MarkAsReadAsync(id, userId, lastSeenMessageId.Value);
         await onlineHub.Clients.Group($"conversation:{id}").SendAsync("chat:read", new
@@ -355,15 +369,14 @@ public class ConversationsController(
     }
 
     [HttpPatch("{id:int}/mute")]
-    public async Task<IActionResult> ToggleMute(int id)
+    public async Task<ActionResult> ToggleMute(int id)
     {
         if (!User.TryGetUserId(out var userId)) return Unauthorized();
 
         var conv = await db.Conversations.FindAsync(id);
         if (conv == null) return NotFound();
-        if (!conv.IsParticipant(userId)) return Forbid();
-        if (IsBlockedBidirectional(conv.SellerId, conv.BuyerId))
-            return StatusCode(403, new ApiError("forbidden", "Диалог недоступен."));
+        var accessResult = await EnsureCanAccessConversationAsync(userId, conv);
+        if (accessResult != null) return accessResult;
 
         if (userId == conv.SellerId) conv.IsMutedForSeller = !conv.IsMutedForSeller;
         else conv.IsMutedForBuyer = !conv.IsMutedForBuyer;
@@ -373,7 +386,7 @@ public class ConversationsController(
     }
 
     [HttpPatch("{id:int}/archive")]
-    public async Task<IActionResult> ToggleArchive(int id)
+    public async Task<ActionResult> ToggleArchive(int id)
     {
         if (!User.TryGetUserId(out var userId)) return Unauthorized();
 
@@ -389,7 +402,7 @@ public class ConversationsController(
     }
 
     [HttpPatch("{id:int}/messages/{messageId:int}")]
-    public async Task<IActionResult> EditMessage(int id, int messageId, [FromBody] EditMessageRequest req)
+    public async Task<ActionResult<ConversationMessageActionDto>> EditMessage(int id, int messageId, [FromBody] EditMessageRequest req)
     {
         if (!User.TryGetUserId(out var userId)) return Unauthorized();
 
@@ -406,13 +419,13 @@ public class ConversationsController(
             return StatusCode(403, new ApiError("forbidden", "Вы не являетесь автором этого сообщения."));
 
         var updated = await writer.EnqueuePatchAsync(id, messageId, req.Text, req.Attachments);
-        return Ok(new ConversationMessageActionDto(id, updated));
+        return await SendMessageAndNotifyAsync(id, updated);
     }
 
     [HttpPost("{id:int}/messages/{messageId:int}/attachments")]
     [DisableRequestSizeLimit]
     [RequestFormLimits(MultipartBodyLengthLimit = 200_000_000)]
-    public async Task<IActionResult> AddMessageAttachment(int id, int messageId, [FromForm] List<IFormFile> files)
+    public async Task<ActionResult<ConversationMessageActionDto>> AddMessageAttachment(int id, int messageId, [FromForm(Name = "files")] IFormFileCollection files)
     {
         if (!User.TryGetUserId(out var userId)) return Unauthorized();
 
@@ -428,72 +441,87 @@ public class ConversationsController(
         if (existing.AuthorId != userId)
             return StatusCode(403, new ApiError("forbidden", "Вы не являетесь автором этого сообщения."));
 
-        var newAttachments = await Task.WhenAll(files.Select(f => SaveAttachmentAsync(conv, f)));
+        var fileValidationError = messageFlow.ValidateAttachments(files);
+        if (fileValidationError != null)
+            return BadRequest(new ApiError("validation_error", fileValidationError));
+
+        var newAttachments = await Task.WhenAll(files.Select(f => messageFlow.SaveAttachmentAsync(conv, f)));
         var combined = (existing.Attachments ?? []).Concat(newAttachments).ToList();
         var updated = await writer.EnqueuePatchAsync(id, messageId, null, combined);
-        return Ok(new ConversationMessageActionDto(id, updated));
+        return await SendMessageAndNotifyAsync(id, updated);
     }
 
     [HttpDelete("{id:int}/messages/{messageId:int}")]
-    public async Task<IActionResult> DeleteMessage(int id, int messageId)
+    public async Task<ActionResult<ConversationMessageActionDto>> DeleteMessage(int id, int messageId)
     {
         if (!User.TryGetUserId(out var userId)) return Unauthorized();
 
-        var conv = await db.Conversations.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id);
+        var conv = await conversations.GetByIdAsync(id, includeDetails: false, asNoTracking: true);
         if (conv == null) return NotFound();
-        if (!conv.IsParticipant(userId)) return Forbid();
-        if (IsBlockedBidirectional(conv.SellerId, conv.BuyerId))
-            return StatusCode(403, new ApiError("forbidden", "Диалог недоступен."));
+        var accessResult = await EnsureCanAccessConversationAsync(userId, conv);
+        if (accessResult != null) return accessResult;
 
         var existing = await reader.FindByIdAsync(conv, messageId);
         if (existing == null) return NotFound();
         if (existing.AuthorId != userId) return Forbid();
 
         var updated = await writer.EnqueueDeleteAsync(id, messageId);
-        return Ok(new ConversationMessageActionDto(id, updated));
+        return await SendMessageAndNotifyAsync(id, updated);
     }
 
     [HttpPost("{id:int}/attachments")]
     [DisableRequestSizeLimit]
     [RequestFormLimits(MultipartBodyLengthLimit = 200_000_000)]
-    public async Task<IActionResult> UploadAttachment(int id, [FromForm] List<IFormFile> files, [FromForm] string? caption)
+    public async Task<ActionResult<ConversationMessageActionDto>> UploadAttachment(int id, [FromForm(Name = "files")] IFormFileCollection files, [FromForm] string? caption)
     {
         if (!User.TryGetUserId(out var userId)) return Unauthorized();
-
         var conv = await db.Conversations.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id);
         if (conv == null) return NotFound();
-        if (!conv.IsParticipant(userId)) return Forbid();
-        if (IsBlockedBidirectional(conv.SellerId, conv.BuyerId))
-            return StatusCode(403, new ApiError("forbidden", "Диалог недоступен."));
+        var accessResult = await EnsureCanAccessConversationAsync(userId, conv);
+        if (accessResult != null) return accessResult;
 
-        var attachments = await Task.WhenAll(files.Select(f => SaveAttachmentAsync(conv, f)));
-        var type = attachments.All(a => a.Type == nameof(MessageType.Image)) ? MessageType.Image : MessageType.File;
-        var msg = await writer.EnqueueAsync(id, userId, type, caption, attachments: [.. attachments]);
-        return Ok(new ConversationMessageActionDto(id, msg));
+        return await UploadAttachmentsToConversationAsync(conv, userId, files, caption, null);
+    }
+
+    // Shared helpers for by-ad endpoints to avoid duplication
+    private async Task<ActionResult<ConversationMessageActionDto>> CreateAndSendMessageByAdAsync(int adId, int buyerId, MessageType type, string? text, int? replyToMessageId)
+    {
+        if (await perms.HasActiveRestrictionAsync(buyerId, RestrictionType.ChatBan))
+            return StatusCode(403, new ApiError("chat_banned", "You cannot send messages"));
+        var conv = await GetOrCreateByAdAsync(adId, buyerId);
+        if (conv == null) return NotFound();
+        return await CreateAndSendMessage(conv.Id, buyerId, type, text, replyToMessageId);
+    }
+
+    private async Task<ActionResult<ConversationMessageActionDto>> UploadAttachmentsByAdAsync(int adId, int buyerId, IFormFileCollection files, string? text, int? replyToMessageId)
+    {
+        if (await perms.HasActiveRestrictionAsync(buyerId, RestrictionType.ChatBan))
+            return StatusCode(403, new ApiError("chat_banned", "You cannot send messages"));
+        var conv = await GetOrCreateByAdAsync(adId, buyerId);
+        if (conv == null) return NotFound();
+        var contentText = string.IsNullOrWhiteSpace(text) ? Request.Form["caption"].FirstOrDefault() : text;
+        return await UploadAttachmentsToConversationAsync(conv, buyerId, files, contentText, replyToMessageId);
     }
 
     [HttpPost("by-ad/{adId:int}/attachments")]
     [DisableRequestSizeLimit]
     [RequestFormLimits(MultipartBodyLengthLimit = 200_000_000)]
-    public async Task<IActionResult> UploadAttachmentByAd(int adId, [FromForm] List<IFormFile> files, [FromForm] string? caption)
+    public async Task<ActionResult<ConversationMessageActionDto>> UploadAttachmentByAd(int adId, [FromForm(Name = "files")] IFormFileCollection files, [FromForm] string? caption)
     {
         if (!User.TryGetUserId(out var buyerId)) return Unauthorized();
         var conv = await GetOrCreateByAdAsync(adId, buyerId);
         if (conv == null) return NotFound();
-        var attachments = await Task.WhenAll(files.Select(f => SaveAttachmentAsync(conv, f)));
-        var type = attachments.All(a => a.Type == nameof(MessageType.Image)) ? MessageType.Image : MessageType.File;
-        return Ok(new ConversationMessageActionDto(conv.Id, await writer.EnqueueAsync(conv.Id, buyerId, type, caption, attachments: [.. attachments])));
+        return await UploadAttachmentsToConversationAsync(conv, buyerId, files, caption, null);
     }
 
     [HttpGet("{id:int}")]
-    public async Task<IActionResult> GetConversation(int id)
+    public async Task<ActionResult<ConversationStateDto>> GetConversation(int id)
     {
         if (!User.TryGetUserId(out var userId)) return Unauthorized();
         var conversation = await db.Conversations.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id);
         if (conversation == null) return NotFound();
-        if (!conversation.IsParticipant(userId)) return Forbid();
-        if (IsBlockedBidirectional(conversation.SellerId, conversation.BuyerId))
-            return StatusCode(403, new ApiError("forbidden", "Диалог недоступен."));
+        var accessResult = await EnsureCanAccessConversationAsync(userId, conversation);
+        if (accessResult != null) return accessResult;
         var (Count, FirstUnreadMessageId) = await writer.GetUnreadStateAsync(conversation, userId);
         var opponentId = conversation.SellerId == userId ? conversation.BuyerId : conversation.SellerId;
         var myLastSeenMessageId = await writer.GetLastSeenMessageIdAsync(conversation, userId);
@@ -534,62 +562,21 @@ public class ConversationsController(
         return conversation.ToDto(userId, Count, FirstUnreadMessageId);
     }
 
-    private async Task<Conversation?> GetOrCreateByAdAsync(int adId, int buyerId)
-    {
-        var sellerId = await db.Ads.AsNoTracking().Where(a => a.Id == adId).Select(a => (int?)a.UserId).FirstOrDefaultAsync();
-        if (sellerId == null) return null;
-        if (await IsBlockedBidirectionalAsync(buyerId, sellerId.Value)) return null;
-        var conv = await db.Conversations.FirstOrDefaultAsync(c => c.AdId == adId && c.SellerId == sellerId && c.BuyerId == buyerId);
-        if (conv != null) return conv;
-        conv = new Conversation
-        {
-            AdId = adId,
-            SellerId = sellerId.Value,
-            BuyerId = buyerId
-        };
-        db.Conversations.Add(conv);
-        await db.SaveChangesAsync();
+    private Task<Conversation?> GetOrCreateByAdAsync(int adId, int buyerId) =>
+        conversationService.GetOrCreateByAdAsync(db, adId, buyerId);
 
-        conv.DialogFolderPath = $"files/{sellerId.Value}/Ads/{adId}/dialogs/{conv.Id}";
-        await db.SaveChangesAsync();
-        Directory.CreateDirectory(Path.Combine(env.WebRootPath ?? "wwwroot", conv.DialogFolderPath));
-        Directory.CreateDirectory(Path.Combine(env.WebRootPath ?? "wwwroot", conv.DialogFolderPath, "attachments"));
-        return conv;
+    // Consolidated access check used across controller to avoid duplication of participant/block checks
+    private async Task<ActionResult?> EnsureCanAccessConversationAsync(int userId, Conversation conv)
+    {
+        if (!conv.IsParticipant(userId)) return Forbid();
+        if (await IsBlockedBidirectionalAsync(conv.SellerId, conv.BuyerId))
+            return StatusCode(403, new ApiError("forbidden", "Диалог недоступен."));
+        return null;
     }
 
-    private static MessageType DetectMessageType(string ext) =>
-        ext.ToLowerInvariant() switch
-        {
-            ".jpg" or ".jpeg" or ".png" or ".gif" or ".webp" or ".bmp" or ".svg" => MessageType.Image,
-            _ => MessageType.File
-        };
 
-    private async Task<ChatAttachment> SaveAttachmentAsync(Conversation conv, IFormFile file)
-    {
-        var webRoot = env.WebRootPath ?? "wwwroot";
-        var attachFolder = Path.Combine(webRoot, conv.DialogFolderPath.TrimStart('/').Replace('/', Path.DirectorySeparatorChar), "attachments");
-        Directory.CreateDirectory(attachFolder);
 
-        var ext = Path.GetExtension(file.FileName);
-        var msgType = DetectMessageType(ext);
-        var isImage = msgType == MessageType.Image;
-        var fileName = isImage ? $"{Guid.NewGuid():N}.jpg" : $"{Guid.NewGuid():N}{ext}";
-        var fullPath = Path.Combine(attachFolder, fileName);
-
-        await using var stream = file.OpenReadStream();
-        if (isImage)
-        {
-            await imageService.SaveCompressedImageAsync(stream, attachFolder, fileName, targetKb: 50);
-        }
-        else
-        {
-            await using var output = System.IO.File.Create(fullPath);
-            await stream.CopyToAsync(output);
-        }
-
-        var url = $"/{conv.DialogFolderPath}/attachments/{fileName}".Replace('\\', '/');
-        return new ChatAttachment(url, msgType.ToString());
-    }
+    // Attachment validation and saving moved to MessageFlowService
 
     private bool IsBlockedBidirectional(int userA, int userB) =>
         db.UserBlocks.AsNoTracking().Any(b =>
@@ -603,7 +590,6 @@ public class ConversationsController(
 }
 
 public record CreateConversationRequest(int AdId);
-public record SendMessageRequest(MessageType Type, string? Text, int? ReplyToMessageId);
 public record EditMessageRequest(string? Text, List<ChatAttachment>? Attachments);
 
 public static class ConversationExtensions

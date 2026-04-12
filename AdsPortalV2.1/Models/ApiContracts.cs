@@ -5,7 +5,7 @@ namespace AdsPortalV2.Models;
 
 public sealed record PagedResultDto<T>(IReadOnlyCollection<T> Items, int Total, int Page, int PageSize, int TotalPages);
 
-public sealed record AdImageDto(int Id, int AdId, string FilePath, int SortOrder);
+public sealed record AdImageDto(int Id, int AdId, string FilePath, int SortOrder, bool IsMain = false);
 public sealed record AdCategoryDto(int Id, string Name, int? ParentId = null);
 public sealed record AdOwnerDto(int Id, string UserLogin, string? UserName, string? UserEmail, string? UserPhoneNumber, string? AvatarPath, IReadOnlyCollection<string> Roles, DateTime CreatedAt, DateTime LastActivityAt);
 public sealed record AdDetailsDto(
@@ -19,6 +19,7 @@ public sealed record AdDetailsDto(
     int LocationId,
     LocationRef? Location,
     string? ListingType,
+    int? MainImageId,
     DateTime CreatedAt,
     DateTime UpdatedAt,
     AdStatus? ModerationStatus,
@@ -43,12 +44,12 @@ public sealed record ModerationAdDto(
     int UserId,
     string? UserName,
     string? UserLogin,
-    string? MainImageUrl);
+    string? MainImagePath);
 
 public sealed record CreateAdResultDto(string Message, int AdId, IReadOnlyCollection<AdImageDto>? Images = null);
 public sealed record UploadFilesResultDto(IReadOnlyCollection<string> Files);
-public sealed record PatchErrorDto(string Code, string? Field, string Message);
-public sealed record PatchResultDto(bool Success, IReadOnlyCollection<string> Updated, IReadOnlyCollection<string> Skipped, IReadOnlyCollection<PatchErrorDto> Errors);
+public record PatchIssueDto(string Code, string? Field, string Message);
+public sealed record PatchResultDto(bool Success, IReadOnlyCollection<string> Updated, IReadOnlyCollection<PatchIssueDto> Skipped, IReadOnlyCollection<PatchIssueDto> Errors);
 public sealed record FavoriteMutationDto(int AdId, DateTime? AddedAt = null);
 public sealed record AvatarUploadDto(string AvatarPath);
 public sealed record RestrictionActionDto(
@@ -63,14 +64,17 @@ public sealed record RestrictionTypeDto(
     [property: JsonPropertyName("label")] string Label);
 public sealed record RoleActionDto(int Id, string Role);
 public sealed record AdStatusActionDto(int Id, AdStatus Status);
+public sealed record NotificationPreviewDto(string Title, string? MainImagePath = null);
+public sealed record NotificationDataDto(string ActorName, string? Reason = null);
+
 public sealed record NotificationDto(
     int Id,
     string Type,
     bool IsRead,
     DateTime CreatedAt,
     string? Reason,
-    object? Preview,
-    object? Data);
+    NotificationPreviewDto? Preview,
+    NotificationDataDto? Data);
 
 public sealed record NotificationsResultDto(IReadOnlyCollection<NotificationDto> Items);
 
@@ -92,7 +96,7 @@ public sealed record UserAdDto(
     DateTime? DeletedAt,
     int UserId,
     AdCategoryDto? Category,
-    string? MainImage,
+    string? MainImagePath,
     bool IsFavorite = false);
 
 public sealed record UserProfileDto(
@@ -115,7 +119,7 @@ public sealed record FavoriteAdDto(
     string Title,
     decimal? Price,
     bool IsNegotiable,
-    string? MainImageUrl,
+    string? MainImagePath,
     DateTime CreatedAt,
     DateTime UpdatedAt,
     LocationRef? Location,
@@ -126,25 +130,26 @@ public sealed record FavoriteAdDto(
     int UserId);
 
 public sealed record ConversationActionDto(int ConversationId, string Message, ConversationDto? Conversation = null);
-public sealed record ConversationMessageActionDto(int ConversationId, ChatMessage Message);
+public sealed record ConversationMessageActionDto(int ConversationId, ConversationMessageDto Message);
 
 public sealed record ConversationAdMetaDto(int Id, string Title, decimal? Price, DateTime CreatedAt, AdStatus Status, string? MainImagePath);
 public sealed record ConversationUserPresenceDto(int Id, string? UserName, string UserLogin, string? AvatarPath, DateTime LastActivityAt, bool IsOnline);
 public sealed record ConversationMetaDto(int Id, int AdId, ConversationAdMetaDto Ad, ConversationUserPresenceDto Me, ConversationUserPresenceDto Opponent, DateTime CreatedAt, bool IsClosed, string? LastMessageText);
 
-public sealed record MessageAuthorDto(string? UserName, string UserLogin, string? AvatarPath);
+public sealed record MessageAuthorDto(int Id, string? UserName, string UserLogin, string? AvatarPath);
 public sealed record ConversationMessageDto(
     int ConversationId,
     int Id,
     MessageType Type,
     int AuthorId,
-    MessageAuthorDto? Author,
+    MessageAuthorDto Author,
     DateTime CreatedAt,
     string? Text,
     IReadOnlyCollection<ChatAttachment> Attachments,
     int? ReplyToMessageId,
     DateTime? EditedAt,
-    DateTime? DeletedAt);
+    DateTime? DeletedAt,
+    string? ClientTag);
 
 public sealed record ConversationMessagesChunkDto(IReadOnlyCollection<ConversationMessageDto> Messages, bool HasMore);
 
@@ -209,13 +214,9 @@ public sealed record AdminAdListItemDto(
     AdminAdOwnerDto? Owner,
     AdCategoryDto? Category,
     LocationRef? Location,
-    string? MainImageUrl);
+    string? MainImagePath);
 
-public sealed record AdminAdsResultDto(int Total, IReadOnlyCollection<AdminAdListItemDto> Items);
-public sealed record AdminUsersResultDto(int Total, IReadOnlyCollection<UserDto> Items);
-public sealed record AdminLogsResultDto(int Total, IReadOnlyCollection<AdminAuditLogDto> Items);
-
-public sealed record AuthSessionResponseDto(string AccessToken, string RefreshToken, int UserId, string UserLogin, string? UserName, string? Avatar);
+public sealed record AuthSessionResponseDto(string AccessToken, string RefreshToken, int UserId, string UserLogin, string? UserName, string? AvatarPath);
 public sealed record AuthRefreshResponseDto(string AccessToken, string RefreshToken);
 public sealed record AuthSessionDto(Guid Id, string? DeviceName, string? IpAddress, DateTime LastActivityAt, DateTime CreatedAt, bool IsCurrent);
 public sealed record MeRestrictionDto(string Type, DateTime? ExpiresAt, string? Reason);

@@ -9,7 +9,7 @@ using Microsoft.EntityFrameworkCore;
 namespace AdsPortalV2.Hubs;
 
 [Authorize]
-public class NotificationHub(AppDbContext db, PermissionService perms) : Hub
+public class SystemNotificationHub(AppDbContext db, PermissionService perms) : Hub
 {
     public override async Task OnConnectedAsync()
     {
@@ -73,6 +73,6 @@ public class NotificationHub(AppDbContext db, PermissionService perms) : Hub
                 n,
                 n.AdId.HasValue && imagesByAdId.TryGetValue(n.AdId.Value, out var image) ? image : null))
             .ToList();
-        await Clients.Caller.SendAsync("initNotifications", dto);
+        await Clients.Caller.SendAsync(HubEvents.InitNotifications, dto);
     }
 }

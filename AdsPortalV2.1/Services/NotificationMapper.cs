@@ -18,20 +18,20 @@ public static class NotificationMapper
     public static NotificationDto ToDto(Notification notification)
         => ToDto(notification, null);
 
-    private static Dictionary<string, object?>? MergePreview(string? json, string? image)
+    private static NotificationPreviewDto? MergePreview(string? json, string? image)
     {
-        var preview = DeserializeDictionary(json);
+        var preview = DeserializePreview(json);
         if (preview == null && image == null)
             return null;
 
-        preview ??= [];
-        preview["image"] = image;
-        return preview;
+        return preview is null
+            ? new NotificationPreviewDto(string.Empty, image)
+            : preview with { MainImagePath = image ?? preview.MainImagePath };
     }
 
-    private static Dictionary<string, object?>? DeserializeDictionary(string? json)
-        => json == null ? null : JsonSerializer.Deserialize<Dictionary<string, object?>>(json);
+    private static NotificationPreviewDto? DeserializePreview(string? json)
+        => json == null ? null : JsonSerializer.Deserialize<NotificationPreviewDto>(json);
 
-    private static object? Deserialize(string? json)
-        => json == null ? null : JsonSerializer.Deserialize<object>(json);
+    private static NotificationDataDto? Deserialize(string? json)
+        => json == null ? null : JsonSerializer.Deserialize<NotificationDataDto>(json);
 }

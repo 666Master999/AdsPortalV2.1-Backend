@@ -1,8 +1,10 @@
 using AdsPortalV2;
 using AdsPortalV2.Entities;
 using AdsPortalV2.Controllers;
+using AdsPortalV2.Extensions;
 using AdsPortalV2.Data;
 using AdsPortalV2.Hubs;
+using AdsPortalV2.Models;
 using AdsPortalV2.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -11,24 +13,73 @@ using Microsoft.IdentityModel.Tokens;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json.Serialization;
+using System.Text.Json;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.OpenApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Services
+    .AddControllers()
+    .AddJsonOptions(o =>
+    {
+        o.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+        o.JsonSerializerOptions.Converters.Add(new CamelCaseEnumConverterFactory());
+    });
+
+builder.Services
+    .AddSignalR()
+    .AddJsonProtocol(o =>
+    {
+        o.PayloadSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+        o.PayloadSerializerOptions.Converters.Add(new CamelCaseEnumConverterFactory());
+    });
 
 builder.WebHost.ConfigureKestrel(o => o.Limits.MaxRequestBodySize = 200_000_000);
 
 builder.Services.AddMemoryCache();
 builder.Services.AddHealthChecks().AddDbContextCheck<AppDbContext>();
 builder.Services.AddResponseCompression();
-builder.Services.AddOpenApi();
-builder.Services.AddControllers()
-    .AddJsonOptions(o =>
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SupportNonNullableReferenceTypes();
+    options.OperationFilter<DefaultErrorResponsesFilter>();
+    options.SchemaFilter<EnumSchemaFilter>();
+
+    options.SwaggerDoc("v1", new OpenApiInfo
     {
-        o.JsonSerializerOptions.ReferenceHandler = ReferenceHandler.IgnoreCycles;
-        // Use camelCase enum strings so frontend always receives predictable lowercase values
-        o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter(System.Text.Json.JsonNamingPolicy.CamelCase));
+        Title = "AdsPortal API",
+        Version = "v1"
     });
+
+    options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+        In = ParameterLocation.Header,
+        Description = "Bearer {token}"
+    });
+
+    options.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+});
+// controllers configured earlier with centralized JsonSerializerOptions
 
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("Default")));
@@ -127,12 +178,16 @@ authorization.AddPolicy(AuthorizationPolicies.CanDeleteAd, p => p.Requirements.A
 
 builder.Services.AddCustomCors(builder.Configuration);
 
-builder.Services.AddSignalR();
 builder.Services.AddSingleton<OnlineUserTracker>();
 builder.Services.AddHostedService<PresenceCleanupService>();
 builder.Services.AddScoped<ImageService>();
+builder.Services.AddScoped<MessageFlowService>();
+builder.Services.AddScoped<ConversationService>();
+builder.Services.AddScoped<IConversationRepository, EfConversationRepository>();
+builder.Services.AddScoped<IUserRepository, EfUserRepository>();
 builder.Services.AddScoped<AdQueryService>();
 builder.Services.AddScoped<AdVisibilityService>();
+builder.Services.AddScoped<IAdDetailsService, AdDetailsService>();
 builder.Services.AddScoped<ITokenService, TokenService>();
 builder.Services.AddScoped<PermissionService>();
 builder.Services.AddScoped<IFileStorage, FileStorage>();
@@ -146,6 +201,8 @@ builder.Services.AddScoped<IAuthorizationHandler, CanDeleteAdHandler>();
 builder.Services.AddSingleton<DialogWriterService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<DialogWriterService>());
 builder.Services.AddScoped<DialogReaderService>();
+// Snapshot background worker
+builder.Services.AddHostedService<SnapshotBackgroundService>();
 
 builder.Services.AddRateLimiter(options =>
 {
@@ -204,12 +261,19 @@ app.UseMiddleware<ActivityMiddleware>();
 app.UseStaticFiles();
 
 app.MapControllers();
-app.MapOpenApi();
+app.UseSwagger();
+app.UseSwaggerUI(c =>
+{
+    // Serve Swagger UI at application root
+    c.RoutePrefix = string.Empty;
+    // label shown in the UI header and the select box
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "AdsPortal API v1");
+});
 app.MapHealthChecks("/health");
-app.MapHub<NotificationHub>("/hubs/notifications");
-app.MapHub<OnlineHub>("/hubs/online");
+app.MapHub<SystemNotificationHub>("/hubs/notifications");
+app.MapHub<ChatHub>("/hubs/chat");
 
 // Seed the database with default data
 app.SeedDatabase();
 
-app.Run();
+app.Run();

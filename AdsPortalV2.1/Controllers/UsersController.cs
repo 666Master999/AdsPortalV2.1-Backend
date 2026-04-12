@@ -21,7 +21,7 @@ namespace AdsPortalV2.Controllers
         private readonly AdVisibilityService _adVisibility = adVisibility;
 
         [HttpGet("{id:int}")]
-        public async Task<IActionResult> GetById(int id)
+        public async Task<ActionResult<UserProfileResponseDto>> GetById(int id)
         {
             var currentUserId = User.TryGetUserId(out var currentUid) ? currentUid : (int?)null;
             if (currentUserId.HasValue && await IsBlockedBidirectionalAsync(currentUserId.Value, id))
@@ -63,7 +63,7 @@ namespace AdsPortalV2.Controllers
                 ad.DeletedAt,
                 ad.UserId,
                 ad.Category == null ? null : new AdCategoryDto(ad.Category.Id, ad.Category.Name),
-                _db.AdImages.Where(img => img.Id == ad.MainImageId).Select(img => img.FilePath).FirstOrDefault()))
+                FilePathHelpers.EnsurePublicPath(_db.AdImages.Where(img => img.Id == ad.MainImageId).Select(img => img.FilePath).FirstOrDefault())))
             .ToListAsync();
 
             if (!isOwnProfile)
@@ -89,9 +89,9 @@ namespace AdsPortalV2.Controllers
                     user.UserName,
                     user.UserEmail,
                     user.UserPhoneNumber,
-                    user.AvatarPath,
+                    FilePathHelpers.EnsurePublicPath(user.AvatarPath),
                     [.. user.UserRoles.Select(ur => ur.Role?.Name).OfType<string>()],
-                    _tracker.IsOnline(user.Id),
+                    _tracker.IsOnline(user.Id.ToString()),
                     user.CreatedAt,
                     user.LastActivityAt,
                     ads),
@@ -102,7 +102,7 @@ namespace AdsPortalV2.Controllers
 
         [Authorize]
         [HttpPatch("{id:int}")]
-        public async Task<IActionResult> Patch(int id, [FromBody] Dictionary<string, JsonElement> data)
+        public async Task<ActionResult<PatchResultDto>> Patch(int id, [FromBody] JsonElement body)
         {
             if (!User.TryGetUserId(out var currentUserId))
                 return Unauthorized();
@@ -114,46 +114,48 @@ namespace AdsPortalV2.Controllers
             if (user is null) return NotFound();
 
             var updated = new HashSet<string>();
-            var skipped = new List<string>();
-            var errors = new List<PatchErrorDto>();
+            var skipped = new List<PatchIssueDto>();
+            var errors = new List<PatchIssueDto>();
 
-            foreach (var kv in data)
+            if (body.TryGetProperty("password", out var passwordProp))
             {
-                var key = kv.Key;
-
-                if (key.Equals(UserFieldNames.Password, StringComparison.OrdinalIgnoreCase))
+                var password = passwordProp.ValueKind == JsonValueKind.Null ? null : passwordProp.GetString()?.Trim();
+                if (string.IsNullOrWhiteSpace(password))
+                    errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, UserFieldNames.Password, "Password cannot be empty."));
+                else
                 {
-                    var password = kv.Value.ValueKind == JsonValueKind.String ? kv.Value.GetString() : null;
-                    if (string.IsNullOrWhiteSpace(password))
-                        errors.Add(new PatchErrorDto(PatchErrorCodes.InvalidValue, UserFieldNames.Password, "Password cannot be empty."));
-                    else
-                    {
-                        user.UserPasswordHash = PasswordService.Hash(password);
-                        updated.Add(UserFieldNames.Password);
-                    }
-
-                    continue;
+                    user.UserPasswordHash = PasswordService.Hash(password);
+                    updated.Add(UserFieldNames.Password);
                 }
-
-                if (key.Equals(UserFieldNames.UserLogin, StringComparison.OrdinalIgnoreCase)) PatchHelpers.UpdateString(kv.Value, user.UserLogin, v => user.UserLogin = v, UserFieldNames.UserLogin, updated, skipped, errors, required: true);
-                else if (key.Equals(UserFieldNames.UserName, StringComparison.OrdinalIgnoreCase)) PatchHelpers.UpdateNullableString(kv.Value, user.UserName, v => user.UserName = v, UserFieldNames.UserName, updated, skipped, errors);
-                else if (key.Equals(UserFieldNames.UserEmail, StringComparison.OrdinalIgnoreCase)) PatchHelpers.UpdateNullableString(kv.Value, user.UserEmail, v => user.UserEmail = v, UserFieldNames.UserEmail, updated, skipped, errors);
-                else if (key.Equals(UserFieldNames.UserPhoneNumber, StringComparison.OrdinalIgnoreCase)) PatchHelpers.UpdateNullableString(kv.Value, user.UserPhoneNumber, v => user.UserPhoneNumber = v, UserFieldNames.UserPhoneNumber, updated, skipped, errors);
-                else if (key.Equals(UserFieldNames.AvatarPath, StringComparison.OrdinalIgnoreCase)) PatchHelpers.UpdateNullableString(kv.Value, user.AvatarPath, v => user.AvatarPath = v, UserFieldNames.AvatarPath, updated, skipped, errors);
-                else errors.Add(new PatchErrorDto(PatchErrorCodes.NotAllowed, key, $"Field '{key}' is not allowed."));
             }
+
+            if (body.TryGetProperty("userLogin", out var userLoginElem))
+                PatchHelpers.UpdateString(userLoginElem, user.UserLogin, v => user.UserLogin = v, UserFieldNames.UserLogin, updated, skipped, errors);
+
+            if (body.TryGetProperty("userName", out var userNameElem))
+                PatchHelpers.UpdateNullableString(userNameElem, user.UserName, v => user.UserName = v, UserFieldNames.UserName, updated, skipped, errors);
+
+            if (body.TryGetProperty("userEmail", out var userEmailElem))
+                PatchHelpers.UpdateNullableString(userEmailElem, user.UserEmail, v => user.UserEmail = v, UserFieldNames.UserEmail, updated, skipped, errors);
+
+            if (body.TryGetProperty("userPhoneNumber", out var userPhoneElem))
+                PatchHelpers.UpdateNullableString(userPhoneElem, user.UserPhoneNumber, v => user.UserPhoneNumber = v, UserFieldNames.UserPhoneNumber, updated, skipped, errors);
+
+            if (body.TryGetProperty("avatarPath", out var avatarElem))
+                PatchHelpers.UpdateNullableString(avatarElem, user.AvatarPath, v => user.AvatarPath = v, UserFieldNames.AvatarPath, updated, skipped, errors);
+
+            // Early return on validation errors — do not persist invalid state
+            if (errors.Count > 0)
+                return BadRequest(new PatchResultDto(false, updated, skipped, errors));
 
             await _db.SaveChangesAsync();
 
-            var success = errors.Count == 0 || updated.Count > 0;
-            return success
-                ? Ok(new PatchResultDto(true, updated, skipped, errors))
-                : BadRequest(new PatchResultDto(false, updated, skipped, errors));
+            return Ok(new PatchResultDto(true, updated, skipped, errors));
         }
 
         [Authorize]
         [HttpGet("{id:int}/favorites")]
-        public async Task<IActionResult> GetFavorites(int id)
+        public async Task<ActionResult<IReadOnlyCollection<FavoriteAdDto>>> GetFavorites(int id)
         {
             if (!User.TryGetUserId(out var currentUserId) || currentUserId != id)
                 return Forbid();
@@ -167,7 +169,7 @@ namespace AdsPortalV2.Controllers
                     x.Ad.Title,
                     x.Ad.Price,
                     x.Ad.IsNegotiable,
-                    _db.AdImages.Where(img => img.Id == x.Ad.MainImageId).Select(img => img.FilePath).FirstOrDefault(),
+                    FilePathHelpers.EnsurePublicPath(_db.AdImages.Where(img => img.Id == x.Ad.MainImageId).Select(img => img.FilePath).FirstOrDefault()),
                     x.Ad.CreatedAt,
                     x.Ad.UpdatedAt,
                     x.Ad.Location == null ? null : new LocationRef(x.Ad.Location.Type, x.Ad.Location.Id, x.Ad.Location.Name),
@@ -183,7 +185,7 @@ namespace AdsPortalV2.Controllers
 
         [Authorize]
         [HttpPost("{id:int}/favorites")]
-        public async Task<IActionResult> AddToFavorites(int id, [FromBody] int adId)
+        public async Task<ActionResult<FavoriteMutationDto>> AddToFavorites(int id, [FromBody] int adId)
         {
             if (!User.TryGetUserId(out var currentUserId) || currentUserId != id)
                 return Forbid();
@@ -202,7 +204,7 @@ namespace AdsPortalV2.Controllers
 
         [Authorize]
         [HttpDelete("{id:int}/favorites/{adId:int}")]
-        public async Task<IActionResult> RemoveFromFavorites(int id, int adId)
+        public async Task<ActionResult> RemoveFromFavorites(int id, int adId)
         {
             if (!User.TryGetUserId(out var currentUserId) || currentUserId != id)
                 return Forbid();
@@ -219,7 +221,7 @@ namespace AdsPortalV2.Controllers
         }
 
         [HttpGet("{id:int}/ads")]
-        public async Task<IActionResult> GetAds(int id)
+        public async Task<ActionResult<IReadOnlyCollection<UserAdDto>>> GetAds(int id)
         {
             var currentUserId = User.TryGetUserId(out var uid) ? uid : (int?)null;
             if (currentUserId.HasValue && await IsBlockedBidirectionalAsync(currentUserId.Value, id))
@@ -252,7 +254,7 @@ namespace AdsPortalV2.Controllers
                 ad.DeletedAt,
                 ad.UserId,
                 ad.Category == null ? null : new AdCategoryDto(ad.Category.Id, ad.Category.Name),
-                _db.AdImages.Where(img => img.Id == ad.MainImageId).Select(img => img.FilePath).FirstOrDefault()))
+                FilePathHelpers.EnsurePublicPath(_db.AdImages.Where(img => img.Id == ad.MainImageId).Select(img => img.FilePath).FirstOrDefault())))
             .ToListAsync();
 
             if (!isOwnProfile)
@@ -271,80 +273,9 @@ namespace AdsPortalV2.Controllers
             return Ok(ads);
         }
 
-        [HttpGet("userprofile/{id:int}")]
-        public async Task<IActionResult> GetUserProfile(int id)
-        {
-            var currentUserId = User.TryGetUserId(out var uid) ? uid : 0;
-            var isOwner = currentUserId == id;
-
-            if (currentUserId > 0 && await IsBlockedBidirectionalAsync(currentUserId, id))
-                return NotFound(new ApiError("not_found", "Пользователь заблокирован или не найден"));
-
-            var user = await _db.Users
-                .AsNoTracking()
-                .Include(u => u.UserRoles).ThenInclude(ur => ur.Role)
-                .FirstOrDefaultAsync(u => u.Id == id);
-
-            if (user is null) return NotFound();
-
-            var adsQuery = _db.Ads.AsNoTracking()
-                .Include(a => a.Location)
-                .Include(a => a.Category)
-                .Where(a => a.UserId == id);
-
-            var visibleAdsQuery = await _adVisibility.ApplyVisibilityAsync(adsQuery, currentUserId == 0 ? null : currentUserId);
-            var ads = await visibleAdsQuery.Select(ad => new UserAdDto(
-                ad.Id,
-                ad.Title,
-                ad.Description,
-                ad.Price,
-                ad.LocationId,
-                ad.Location == null ? null : new LocationRef(ad.Location.Type, ad.Location.Id, ad.Location.Name),
-                ad.ListingType,
-                ad.IsNegotiable,
-                ad.CreatedAt,
-                ad.UpdatedAt,
-                ad.ViewsCount,
-                ad.FavoritesCount,
-                ad.Status,
-                ad.RejectionReason,
-                ad.DeletedAt,
-                ad.UserId,
-                ad.Category == null ? null : new AdCategoryDto(ad.Category.Id, ad.Category.Name),
-                _db.AdImages.Where(img => img.Id == ad.MainImageId).Select(img => img.FilePath).FirstOrDefault())).ToListAsync();
-
-            if (!isOwner)
-                ads = [.. ads.Select(a => a with { ModerationStatus = null })];
-
-            if (currentUserId > 0)
-            {
-                var adIds = ads.Select(a => a.Id).ToList();
-                var favSet = await _db.UserFavoriteAds
-                    .Where(f => f.UserId == currentUserId && adIds.Contains(f.AdId))
-                    .Select(f => f.AdId).ToHashSetAsync();
-                if (favSet.Count > 0)
-                    ads = [.. ads.Select(a => a with { IsFavorite = favSet.Contains(a.Id) })];
-            }
-
-            var dto = new UserProfileDto(
-                user.Id,
-                user.UserLogin,
-                user.UserName,
-                isOwner ? user.UserEmail : null,
-                isOwner ? user.UserPhoneNumber : null,
-                user.AvatarPath,
-                isOwner ? user.UserRoles.Select(ur => ur.Role.Name).ToList() : [],
-                _tracker.IsOnline(user.Id),
-                user.CreatedAt,
-                user.LastActivityAt,
-                ads);
-
-            return Ok(dto);
-        }
-
         [Authorize]
         [HttpPost("{id:int}/upload-avatar")]
-        public async Task<IActionResult> UploadAvatar(int id, IFormFile avatar)
+        public async Task<ActionResult<AvatarUploadDto>> UploadAvatar(int id, IFormFile avatar)
         {
             if (!User.TryGetUserId(out var currentUserId)) return Unauthorized();
             if (!IsOwnerOrAdmin(currentUserId, id)) return Forbid();
@@ -377,7 +308,7 @@ namespace AdsPortalV2.Controllers
 
             // кеш‑бастер, чтобы клиент видел обновление
             var version = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            user.AvatarPath = $"/files/{id}/Avatars/{avatarFileName}?v={version}";
+                    user.AvatarPath = FilePathHelpers.EnsurePublicPath($"files/{id}/Avatars/{avatarFileName}?v={version}");
             await _db.SaveChangesAsync();
 
             return Ok(new AvatarUploadDto(user.AvatarPath!));

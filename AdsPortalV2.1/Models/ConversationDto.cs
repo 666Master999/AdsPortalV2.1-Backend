@@ -18,12 +18,13 @@ public sealed record ConversationDto(
 public sealed record ConversationCompanionDto(
     int Id,
     string Name,
-    string? Avatar);
+    string? AvatarPath,
+    DateTime? LastActivityAt);
 
 public sealed record ConversationAdDto(
     int Id,
     string Title,
-    string? Image,
+    string? MainImagePath,
     AdStatus Status);
 
 public sealed record ConversationLastMessageDto(
@@ -45,18 +46,19 @@ public static class ConversationDtoBuilder
                 conversation.LastMessageType ?? MessageType.Text,
                 conversation.LastMessageAuthorId,
                 conversation.LastMessageText,
-                conversation.LastMessageTimestamp);
+                conversation.LastMessageTimestamp?.ToUniversalTime());
 
         return new ConversationDto(
             conversation.Id,
             new ConversationCompanionDto(
                 companion.Id,
                 companion.UserName ?? companion.UserLogin,
-                companion.AvatarPath),
+                FilePathHelpers.EnsurePublicPath(companion.AvatarPath),
+                companion.LastActivityAt.ToUniversalTime()),
             new ConversationAdDto(
                 conversation.Ad.Id,
                 conversation.Ad.Title,
-                conversation.Ad.Images.FirstOrDefault(img => img.Id == conversation.Ad.MainImageId)?.FilePath,
+                FilePathHelpers.EnsurePublicPath(conversation.Ad.Images.FirstOrDefault(img => img.Id == conversation.Ad.MainImageId)?.FilePath),
                 conversation.Ad.Status),
             lastMessage,
             unreadCount,
