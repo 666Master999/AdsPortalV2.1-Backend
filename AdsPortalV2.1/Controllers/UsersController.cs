@@ -5,6 +5,7 @@ using AdsPortalV2.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using System.Security.Claims;
 using System.Text.Json;
 
@@ -181,6 +182,112 @@ namespace AdsPortalV2.Controllers
                 .ToListAsync();
 
             return Ok(favorites);
+        }
+
+        [Authorize]
+        [HttpPost("{targetId:int}/blocks")]
+        public async Task<IActionResult> BlockUser(int targetId, CancellationToken ct)
+        {
+            if (!User.TryGetUserId(out var userId))
+                return Unauthorized();
+
+            if (userId == targetId)
+                return BadRequest(new ApiError("self_block", "Cannot block yourself"));
+
+            var exists = await _db.Users
+                .AnyAsync(u => u.Id == targetId, ct);
+
+            if (!exists)
+                return NotFound(new ApiError("not_found", "User not found"));
+
+            var entity = new UserBlock
+            {
+                SourceUserId = userId,
+                TargetUserId = targetId,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            _db.UserBlocks.Add(entity);
+
+            try
+            {
+                await _db.SaveChangesAsync(ct);
+            }
+            catch (DbUpdateException)
+            {
+                // UNIQUE(SourceUserId, TargetUserId)
+                HttpContext.RequestServices.GetRequiredService<IMemoryCache>().Remove($"block:{Math.Min(userId,targetId)}:{Math.Max(userId,targetId)}");
+                return Ok(new BlockDto
+                {
+                    TargetUserId = targetId,
+                    CreatedAt = entity.CreatedAt
+                });
+            }
+
+            // invalidate cache
+            HttpContext.RequestServices.GetRequiredService<IMemoryCache>().Remove($"block:{Math.Min(userId,targetId)}:{Math.Max(userId,targetId)}");
+
+            return CreatedAtAction(nameof(GetMyBlocks), new { }, new BlockDto
+            {
+                TargetUserId = targetId,
+                CreatedAt = entity.CreatedAt
+            });
+        }
+
+        [Authorize]
+        [HttpDelete("{targetId:int}/blocks")]
+        public async Task<IActionResult> UnblockUser(int targetId, CancellationToken ct)
+        {
+            if (!User.TryGetUserId(out var userId))
+                return Unauthorized();
+
+            var block = await _db.UserBlocks
+                .FirstOrDefaultAsync(b =>
+                    b.SourceUserId == userId &&
+                    b.TargetUserId == targetId, ct);
+
+            if (block == null)
+                return NoContent(); // idempotent
+
+            _db.UserBlocks.Remove(block);
+            await _db.SaveChangesAsync(ct);
+
+            // invalidate cache
+            HttpContext.RequestServices.GetRequiredService<IMemoryCache>().Remove($"block:{Math.Min(userId,targetId)}:{Math.Max(userId,targetId)}");
+
+            return NoContent();
+        }
+
+        [Authorize]
+        [HttpGet("blocks")]
+        public async Task<ActionResult<List<BlockListItemDto>>> GetMyBlocks(CancellationToken ct)
+        {
+            if (!User.TryGetUserId(out var userId))
+                return Unauthorized();
+
+            var blocks = await _db.UserBlocks
+                .Where(b => b.SourceUserId == userId)
+                .OrderByDescending(b => b.CreatedAt)
+                .Join(
+                    _db.Users,
+                    b => b.TargetUserId,
+                    u => u.Id,
+                    (b, u) => new BlockListItemDto
+                    {
+                        TargetUserId = b.TargetUserId,
+                        CreatedAt = b.CreatedAt,
+                        User = new BlockUserDto
+                        {
+                            Id = u.Id,
+                            // Prefer visible display name, fall back to login when name is empty
+                            Username = u.UserName ?? u.UserLogin ?? string.Empty,
+                            // Return null when no avatar set to avoid empty-string payloads
+                            AvatarUrl = string.IsNullOrWhiteSpace(u.AvatarPath) ? null : FilePathHelpers.EnsurePublicPath(u.AvatarPath)
+                        }
+                    })
+                .ToListAsync(ct);
+
+            return Ok(blocks);
         }
 
         [Authorize]

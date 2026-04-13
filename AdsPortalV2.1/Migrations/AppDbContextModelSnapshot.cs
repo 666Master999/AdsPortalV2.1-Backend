@@ -205,6 +205,9 @@ namespace AdsPortalV2.Migrations
                     b.Property<int>("AdId")
                         .HasColumnType("int");
 
+                    b.Property<int?>("BuyerDeletedUpToMessageId")
+                        .HasColumnType("int");
+
                     b.Property<int>("BuyerId")
                         .HasColumnType("int");
 
@@ -249,6 +252,9 @@ namespace AdsPortalV2.Migrations
                         .HasColumnType("datetime2");
 
                     b.Property<int?>("LastMessageType")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("SellerDeletedUpToMessageId")
                         .HasColumnType("int");
 
                     b.Property<int>("SellerId")
@@ -617,6 +623,17 @@ namespace AdsPortalV2.Migrations
                     b.HasIndex("UserId");
 
                     b.ToTable("AuthSessions", (string)null);
+                });
+
+            modelBuilder.Entity("AdsPortalV2.Models.FtsResult", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("int");
+
+                    b.Property<int>("Rank")
+                        .HasColumnType("int");
+
+                    b.ToTable("FtsResults");
                 });
 
             modelBuilder.Entity("AdsPortalV2.Entities.Ad", b =>

@@ -40,8 +40,9 @@ public class ConversationsController(
         var ad = await conversations.GetAdByIdAsync(req.AdId);
         if (ad == null) return NotFound();
 
-        if (await IsBlockedBidirectionalAsync(buyerId, ad.UserId))
-            return StatusCode(403, new ApiError("forbidden", "Недостаточно прав для общения с этим пользователем."));
+        var blockService = HttpContext.RequestServices.GetRequiredService<IBlockService>();
+        if (!await blockService.CanSendAsync(buyerId, ad.UserId))
+            return StatusCode(403, new ApiError("blocked", "User is blocked"));
 
         if (ad.UserId == buyerId)
             return BadRequest(new ApiError("validation_error", "Нельзя написать самому себе."));
@@ -112,12 +113,20 @@ public class ConversationsController(
     }
 
     [HttpGet]
-    public async Task<ActionResult<IReadOnlyCollection<ConversationDto>>> List()
+        public async Task<ActionResult<IReadOnlyCollection<ConversationDto>>> List()
     {
         if (!User.TryGetUserId(out var userId)) return Unauthorized();
 
         var convs = await conversations.GetForUserAsync(userId);
-        convs = convs.Where(c => !IsBlockedBidirectional(c.SellerId, c.BuyerId)).ToList();
+        convs = convs.Where(c =>
+        {
+            // hide conversations that the user has deleted up to some marker
+            var marker = userId == c.SellerId
+                ? c.SellerDeletedUpToMessageId
+                : c.BuyerDeletedUpToMessageId;
+            //return !IsBlockedBidirectional(c.SellerId, c.BuyerId) && (marker == null || c.TotalMessagesCount > marker.Value);
+            return (marker == null || c.TotalMessagesCount > marker.Value);
+        }).ToList();
 
         var list = await Task.WhenAll(convs.Select(async c =>
         {
@@ -147,16 +156,35 @@ public class ConversationsController(
         bool hasMore;
         int? anchorMessageId = null;
 
+        // Respect "deleted up to" marker set by participant: compute early so anchor can be adjusted
+        var marker = userId == conv.SellerId
+            ? conv.SellerDeletedUpToMessageId
+            : conv.BuyerDeletedUpToMessageId;
+
         if (since.HasValue)
         {
             var cached = writer.GetCachedMessagesSince(conv.Id, since.Value + 1);
             (messages, hasMore) = cached ?? await reader.GetMessagesSinceAsync(conv, since.Value + 1);
         }
         else if (!isInitialLoad)
+        {
+            // If beforeId points into user's deleted zone, ignore it to avoid empty pages
+            if (marker.HasValue && before.HasValue && before <= marker.Value)
+                before = null;
+
             (messages, hasMore) = await reader.GetMessagesAsync(conv, count, before);
+        }
         else
         {
             anchorMessageId = await writer.GetLastSeenMessageIdAsync(conv, userId);
+
+            // If user's anchor (last seen) is at-or-before their deleted marker, ignore anchor so
+            // we load messages from the beginning of the (visible) stream.
+            if (marker.HasValue && anchorMessageId.HasValue && anchorMessageId <= marker.Value)
+            {
+                anchorMessageId = null;
+            }
+
             (messages, hasMore) = await reader.GetMessagesAsync(conv, count, anchorMessageId.HasValue ? anchorMessageId.Value + 1 : null);
 
             // Добавим также непрочитанные/новые сообщения (id >= anchor+1), чтобы фронт получил
@@ -171,6 +199,9 @@ public class ConversationsController(
                 }
             }
         }
+
+        if (marker.HasValue)
+            messages = messages.Where(m => m.Id > marker.Value).ToList();
 
         var authorIds = messages
             .Select(m => m.AuthorId)
@@ -201,6 +232,11 @@ public class ConversationsController(
         if (isInitialLoad && messages.Count > 0)
         {
             var lastMsgId = await reader.GetLatestMessageIdAsync(conv) ?? messages.Max(m => m.Id);
+
+            // If user deleted chat up to marker, ensure we mark as read at least up to marker
+            if (marker.HasValue)
+                lastMsgId = Math.Max(lastMsgId, marker.Value);
+
             await writer.MarkAsReadAsync(conv.Id, userId, lastMsgId);
         }
 
@@ -237,20 +273,30 @@ public class ConversationsController(
         var action = new ConversationMessageActionDto(conversationId, convMessage);
         try
         {
-            await notificationHub.Clients.Group($"conversation:{conversationId}").SendAsync(HubEvents.Message, convMessage);
+            // Per-recipient delivery: respect per-user deleted markers so users who cleared history
+            // do not receive old messages.
+            var conv = await db.Conversations.AsNoTracking()
+                .Where(c => c.Id == conversationId)
+                .Select(c => new { c.Id, c.SellerId, c.BuyerId, c.SellerDeletedUpToMessageId, c.BuyerDeletedUpToMessageId })
+                .FirstOrDefaultAsync();
+
+            if (conv != null)
+            {
+                var participants = new[] { conv.SellerId, conv.BuyerId }.Distinct();
+                foreach (var u in participants)
+                {
+                    var marker = u == conv.SellerId ? conv.SellerDeletedUpToMessageId : conv.BuyerDeletedUpToMessageId;
+                    if (marker == null || msg.Id > marker.Value)
+                    {
+                        try { await notificationHub.Clients.Group($"user:{u}").SendAsync(HubEvents.Message, convMessage); } catch { }
+                        try { await onlineHub.Clients.Group($"user:{u}").SendAsync(HubEvents.Message, convMessage); } catch { }
+                    }
+                }
+            }
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed to send realtime notification for conversation {ConvId}", conversationId);
-        }
-
-        try
-        {
-            await onlineHub.Clients.Group($"conversation:{conversationId}").SendAsync(HubEvents.Message, convMessage);
-        }
-        catch (Exception ex)
-        {
-            logger.LogDebug(ex, "Failed to send onlineHub realtime notification for conversation {ConvId}", conversationId);
         }
 
         return Ok(action);
@@ -259,6 +305,11 @@ public class ConversationsController(
     // Consolidated helper to enqueue a message and send realtime notifications
     private async Task<ActionResult<ConversationMessageActionDto>> CreateAndSendMessage(int conversationId, int userId, MessageType type, string? text, int? replyToMessageId, IEnumerable<ChatAttachment>? attachments = null, string? clientTag = null)
     {
+        var conv = await db.Conversations.FindAsync(conversationId);
+        if (conv == null) return NotFound();
+        var blockService = HttpContext.RequestServices.GetRequiredService<IBlockService>();
+        if (!await blockService.CanSendAsync(conv.SellerId, conv.BuyerId)) return StatusCode(403, new ApiError("blocked", "User is blocked"));
+
         var list = attachments?.ToList();
         var msg = await writer.EnqueueAsync(conversationId, userId, type, text, replyToMessageId, list, clientTag);
         return await SendMessageAndNotifyAsync(conversationId, msg);
@@ -277,8 +328,14 @@ public class ConversationsController(
 
         var conv = await conversations.GetByIdAsync(id, includeDetails: false, asNoTracking: true);
         if (conv == null) return NotFound();
+
         var accessResult = await EnsureCanAccessConversationAsync(userId, conv);
         if (accessResult != null) return accessResult;
+
+        var pipeline = HttpContext.RequestServices.GetRequiredService<MessagePipeline>();
+        var ctx = new MessageContext { SenderId = userId, ConversationId = conv.Id, Text = req.Text };
+        await pipeline.ExecuteAsync(ctx);
+        if (ctx.IsRejected) return StatusCode(403, new ApiError(ctx.ErrorCode ?? "blocked", "User is blocked"));
 
         if (string.IsNullOrWhiteSpace(req.Text) && req.ReplyToMessageId == null && req.Type == MessageType.Text)
             return BadRequest(new ApiError("validation_error", "Empty message body"));
@@ -309,6 +366,11 @@ public class ConversationsController(
         var contentText = text;
         if (string.IsNullOrWhiteSpace(contentText) && Request.HasFormContentType)
             contentText = Request.Form["caption"].FirstOrDefault();
+
+        var pipeline = HttpContext.RequestServices.GetRequiredService<MessagePipeline>();
+        var ctx = new MessageContext { SenderId = userId, ConversationId = conv.Id, Text = contentText };
+        await pipeline.ExecuteAsync(ctx);
+        if (ctx.IsRejected) return StatusCode(403, new ApiError(ctx.ErrorCode ?? "blocked", "User is blocked"));
 
         var hasFiles = files.Count > 0;
         if (string.IsNullOrWhiteSpace(contentText) && !hasFiles && replyToMessageId == null)
@@ -410,7 +472,8 @@ public class ConversationsController(
         if (conv == null) return NotFound();
         if (!conv.IsParticipant(userId))
             return StatusCode(403, new ApiError("forbidden", "Недостаточно прав для доступа к этому диалогу."));
-        if (IsBlockedBidirectional(conv.SellerId, conv.BuyerId))
+        var blockService = HttpContext.RequestServices.GetRequiredService<IBlockService>();
+        if (!await blockService.CanSendAsync(conv.SellerId, conv.BuyerId))
             return StatusCode(403, new ApiError("forbidden", "Диалог недоступен."));
 
         var existing = await reader.FindByIdAsync(conv, messageId);
@@ -433,7 +496,8 @@ public class ConversationsController(
         if (conv == null) return NotFound();
         if (!conv.IsParticipant(userId))
             return StatusCode(403, new ApiError("forbidden", "Недостаточно прав для доступа к этому диалогу."));
-        if (IsBlockedBidirectional(conv.SellerId, conv.BuyerId))
+        var blockService = HttpContext.RequestServices.GetRequiredService<IBlockService>();
+        if (!await blockService.CanSendAsync(conv.SellerId, conv.BuyerId))
             return StatusCode(403, new ApiError("forbidden", "Диалог недоступен."));
 
         var existing = await reader.FindByIdAsync(conv, messageId);
@@ -481,6 +545,31 @@ public class ConversationsController(
         if (accessResult != null) return accessResult;
 
         return await UploadAttachmentsToConversationAsync(conv, userId, files, caption, null);
+    }
+
+    [HttpDelete("{id:int}")]
+    public async Task<ActionResult> DeleteConversation(int id)
+    {
+        if (!User.TryGetUserId(out var userId)) return Unauthorized();
+
+        var conv = await db.Conversations.FindAsync(id);
+        if (conv == null) return NotFound();
+        if (!conv.IsParticipant(userId)) return Forbid();
+
+        // получаем последнее сообщение
+        var lastMessageId = await reader.GetLatestMessageIdAsync(conv);
+        if (lastMessageId == null) return Ok(); // диалог пустой
+
+        logger.LogWarning("DELETE: conv={Id}, lastMessageId={LastId}, total={Total}",
+    conv.Id, lastMessageId, conv.TotalMessagesCount);
+
+        if (userId == conv.SellerId)
+            conv.SellerDeletedUpToMessageId = lastMessageId;
+        else
+            conv.BuyerDeletedUpToMessageId = lastMessageId;
+
+        await db.SaveChangesAsync();
+        return NoContent();
     }
 
     // Shared helpers for by-ad endpoints to avoid duplication
@@ -569,24 +658,18 @@ public class ConversationsController(
     private async Task<ActionResult?> EnsureCanAccessConversationAsync(int userId, Conversation conv)
     {
         if (!conv.IsParticipant(userId)) return Forbid();
-        if (await IsBlockedBidirectionalAsync(conv.SellerId, conv.BuyerId))
-            return StatusCode(403, new ApiError("forbidden", "Диалог недоступен."));
+        //if (await IsBlockedBidirectionalAsync(conv.SellerId, conv.BuyerId))
+        //    return StatusCode(403, new ApiError("forbidden", "Диалог недоступен."));
         return null;
     }
 
+    // Helper: whether participants are allowed to send messages (not mutually blocked)
+    private async Task<bool> CanSendAsync(Conversation conv)
+    {
+        var blockService = HttpContext.RequestServices.GetRequiredService<IBlockService>();
+        return await blockService.CanSendAsync(conv.SellerId, conv.BuyerId);
+    }
 
-
-    // Attachment validation and saving moved to MessageFlowService
-
-    private bool IsBlockedBidirectional(int userA, int userB) =>
-        db.UserBlocks.AsNoTracking().Any(b =>
-            (b.SourceUserId == userA && b.TargetUserId == userB) ||
-            (b.SourceUserId == userB && b.TargetUserId == userA));
-
-    private Task<bool> IsBlockedBidirectionalAsync(int userA, int userB) =>
-        db.UserBlocks.AsNoTracking().AnyAsync(b =>
-            (b.SourceUserId == userA && b.TargetUserId == userB) ||
-            (b.SourceUserId == userB && b.TargetUserId == userA));
 }
 
 public record CreateConversationRequest(int AdId);

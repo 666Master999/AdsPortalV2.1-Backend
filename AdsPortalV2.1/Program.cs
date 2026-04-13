@@ -180,11 +180,14 @@ builder.Services.AddCustomCors(builder.Configuration);
 
 builder.Services.AddSingleton<OnlineUserTracker>();
 builder.Services.AddHostedService<PresenceCleanupService>();
+builder.Services.AddScoped<IBlockService, BlockService>();
 builder.Services.AddScoped<ImageService>();
 builder.Services.AddScoped<MessageFlowService>();
 builder.Services.AddScoped<ConversationService>();
 builder.Services.AddScoped<IConversationRepository, EfConversationRepository>();
 builder.Services.AddScoped<IUserRepository, EfUserRepository>();
+builder.Services.AddScoped<MessagePipeline>();
+builder.Services.AddScoped<IMessageMiddleware, BlockMiddleware>();
 builder.Services.AddScoped<AdQueryService>();
 builder.Services.AddScoped<AdVisibilityService>();
 builder.Services.AddScoped<IAdDetailsService, AdDetailsService>();
@@ -276,4 +279,4 @@ app.MapHub<ChatHub>("/hubs/chat");
 // Seed the database with default data
 app.SeedDatabase();
 
-app.Run();
+app.Run();

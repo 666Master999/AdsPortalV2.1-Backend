@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace AdsPortalV2.Models;
 
-public sealed record PagedResultDto<T>(IReadOnlyCollection<T> Items, int Total, int Page, int PageSize, int TotalPages);
+public sealed record PagedResultDto<T>(IReadOnlyCollection<T> Items, int Total, int Page, int PageSize, int TotalPages, string? NextCursor = null, bool HasMore = false);
 
 public sealed record AdImageDto(int Id, int AdId, string FilePath, int SortOrder, bool IsMain = false);
 public sealed record AdCategoryDto(int Id, string Name, int? ParentId = null);

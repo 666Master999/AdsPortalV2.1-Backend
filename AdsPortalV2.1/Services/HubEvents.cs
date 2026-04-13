@@ -15,6 +15,8 @@ public static class HubEvents
     // Conversation-scoped presence (in-dialog)
     public const string PresenceInDialog = "presence:inDialog";
     public const string PresenceLeftDialog = "presence:leftDialog";
+    // Initial dialog state for caller: list of active users in conversation
+    public const string PresenceInitDialog = "presence:initDialog";
     public const string InitNotifications = "initNotifications";
     public const string ConversationCreated = "chat:conversationCreated";
 }

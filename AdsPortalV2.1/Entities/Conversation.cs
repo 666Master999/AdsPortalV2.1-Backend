@@ -29,4 +29,8 @@ public class Conversation
     public Ad Ad { get; set; } = null!;
     public User Seller { get; set; } = null!;
     public User Buyer { get; set; } = null!;
+
+
+    public int? SellerDeletedUpToMessageId { get; set; }
+    public int? BuyerDeletedUpToMessageId { get; set; }
 }

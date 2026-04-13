@@ -10,3 +10,4 @@ public class UserBlock
     public User SourceUser { get; set; } = null!;
     public User TargetUser { get; set; } = null!;
 }
+

@@ -172,6 +172,24 @@ public class OnlineUserTracker
         return false;
     }
 
+    // Returns list of userIds currently active in given conversation (respecting TTL)
+    public IReadOnlyCollection<string> GetActiveUsersInConversation(int conversationId)
+    {
+        var now = DateTime.UtcNow;
+        var list = new List<string>();
+        foreach (var kv in _userActiveConversation)
+        {
+            var uid = kv.Key;
+            var (convId, lastSeen) = kv.Value;
+            if (convId == conversationId && now - lastSeen < ActiveConversationTimeout)
+            {
+                list.Add(uid);
+            }
+        }
+
+        return list;
+    }
+
     public bool ShouldBroadcastTyping(string userId, int conversationId)
     {
         var now = DateTime.UtcNow;

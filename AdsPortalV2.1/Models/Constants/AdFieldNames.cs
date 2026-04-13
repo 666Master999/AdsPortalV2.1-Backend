@@ -15,4 +15,5 @@ public static class AdFieldNames
     public const string Favorites = "favorites";
     public const string MainImageId = "mainImageId";
     public const string Images = "images";
+    public const string Relevance = "relevance";
 }

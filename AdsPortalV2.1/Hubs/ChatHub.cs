@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
+using Microsoft.Extensions.DependencyInjection;
 using System.Threading;
 using System.Threading.Tasks;
 using AdsPortalV2.Entities;
@@ -62,14 +63,15 @@ public class ChatHub(OnlineUserTracker tracker, IServiceScopeFactory scopeFactor
             );
         }
 
-        // Clear active conversation
-        if (!string.IsNullOrEmpty(userIdStr))
+        // Clear active conversation only when the user went fully offline.
+        // If the user still has other connections, do not clear here — LeaveConversation should be invoked from client.
+        if (!string.IsNullOrEmpty(userIdStr) && isNowOffline)
         {
             if (tracker.TryGetActiveConversation(userIdStr, out var activeConv))
             {
                 tracker.ClearActiveConversation(userIdStr);
 
-                // try to parse for DB-related fields if needed by clients; send out presence-left dialog
+                // send out presence-left dialog to conversation members
                 await Safe(() =>
                     Clients.Group(ConversationGroup(activeConv))
                         .SendAsync(HubEvents.PresenceLeftDialog, new
@@ -188,10 +190,21 @@ public class ChatHub(OnlineUserTracker tracker, IServiceScopeFactory scopeFactor
 
         tracker.SetActiveConversation(userId.ToString(), conversationId);
 
+        // provide list of currently active users in this conversation so clients can compute mutual "in-dialog"
+        var active = tracker.GetActiveUsersInConversation(conversationId);
+
+        // send initial dialog state to the caller first
+        await Clients.Caller.SendAsync(HubEvents.PresenceInitDialog, new
+        {
+            conversationId,
+            activeUsers = active
+        });
+
         await Clients.Group(ConversationGroup(conversationId)).SendAsync(HubEvents.PresenceInDialog, new
         {
             userId = userId.ToString(),
-            conversationId
+            conversationId,
+            activeUsers = active
         });
     }
 
@@ -202,11 +215,13 @@ public class ChatHub(OnlineUserTracker tracker, IServiceScopeFactory scopeFactor
         if (!await IsConversationParticipantAsync(conversationId, userId)) return;
 
         tracker.ClearActiveConversation(userId.ToString());
-
+        // send left + currently active users list
+        var active = tracker.GetActiveUsersInConversation(conversationId);
         await Clients.Group(ConversationGroup(conversationId)).SendAsync(HubEvents.PresenceLeftDialog, new
         {
             userId = userId.ToString(),
-            conversationId
+            conversationId,
+            activeUsers = active
         });
     }
 
@@ -286,11 +301,28 @@ public class ChatHub(OnlineUserTracker tracker, IServiceScopeFactory scopeFactor
         if (Context.User?.TryGetUserId(out var userId) != true) return;
         if (await perms.HasActiveRestrictionAsync(userId, RestrictionType.ChatBan)) return;
         if (!await IsConversationParticipantAsync(conversationId, userId)) return;
+        // Respect user blocks: if participants blocked each other, reject and notify caller
+        using var scope = scopeFactory.CreateScope();
+        var pipeline = scope.ServiceProvider.GetRequiredService<MessagePipeline>();
+        var ctx = new MessageContext { SenderId = userId, ConversationId = conversationId, Text = dto.Text };
+        await pipeline.ExecuteAsync(ctx);
+
+        if (ctx.IsRejected)
+        {
+            try
+            {
+                await Clients.Caller.SendAsync("error", new { code = ctx.ErrorCode ?? "blocked", message = "User is blocked" });
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to send blocked error to caller");
+            }
+            return;
+        }
 
         if (string.IsNullOrWhiteSpace(dto.Text) && dto.ReplyToMessageId == null && dto.Type == MessageType.Text)
             return;
 
-        using var scope = scopeFactory.CreateScope();
         var writer = scope.ServiceProvider.GetRequiredService<DialogWriterService>();
 
         var message = await writer.EnqueueAsync(
@@ -301,10 +333,11 @@ public class ChatHub(OnlineUserTracker tracker, IServiceScopeFactory scopeFactor
             dto.ReplyToMessageId,
             null,
             dto.ClientTag);
-
-        // Send message to the conversation group only to avoid duplicate deliveries
-        await Clients.Group(ConversationGroup(conversationId)).SendAsync(HubEvents.Message, message);
+        // Do not broadcast to the conversation group here — writer/controller are responsible
+        // for per-recipient delivery that respects per-user deleted markers.
     }
+
+    // replaced by IBlockService
 
     public async Task Typing(int conversationId)
     {

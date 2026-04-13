@@ -41,6 +41,8 @@ public class DialogWriterService(IServiceScopeFactory scopeFactory, IWebHostEnvi
     private DateTime _lastWriterEvictionRun = DateTime.MinValue;
     // Dirty set for lightweight reconciliation
     private readonly ConcurrentDictionary<int, byte> _dirtyConversations = new();
+    // per-folder semaphore to avoid concurrent writes to dialog.meta.json
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
     // Cache of last N messages per conversation to speed up reads
     private readonly ConcurrentDictionary<int, ImmutableList<ChatMessage>> _lastMessagesCache = new();
     private readonly object _lastMessagesCacheLock = new();
@@ -78,6 +80,9 @@ public class DialogWriterService(IServiceScopeFactory scopeFactory, IWebHostEnvi
         _reconcileCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _reconcileTask = Task.Run(() => ReconcileLoopAsync(_reconcileCts.Token));
     }
+
+    private static SemaphoreSlim GetLock(string key) =>
+        _locks.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
 
     private async Task RecoverPendingWalsAsync(CancellationToken ct)
     {
@@ -651,11 +656,20 @@ public class DialogWriterService(IServiceScopeFactory scopeFactory, IWebHostEnvi
         dialogMeta.LastMessageId = messageId;
         dialogMeta.LastFileIndex = fileIndex;
         dialogMeta.LastFileSize = new FileInfo(filePath).Length;
-        // write dialog.meta.json atomically
-        var metaJson = JsonSerializer.Serialize(dialogMeta, s_jsonl);
-        var tmpMeta = metaPath + ".tmp";
-        await File.WriteAllTextAsync(tmpMeta, metaJson);
-        File.Move(tmpMeta, metaPath, true);
+        // write dialog.meta.json atomically (protected by per-folder semaphore to avoid races)
+        var sem = GetLock(folder);
+        await sem.WaitAsync();
+        try
+        {
+            var metaJson = JsonSerializer.Serialize(dialogMeta, s_jsonl);
+            var tmpMeta = metaPath + ".tmp";
+            await File.WriteAllTextAsync(tmpMeta, metaJson);
+            File.Move(tmpMeta, metaPath, true);
+        }
+        finally
+        {
+            sem.Release();
+        }
         await ClearWalAsync(folder);
         // Snapshot trigger is done by background worker now. Do not snapshot here.
         _metaCache.Set($"d:{folder}", dialogMeta, MetaOpts);
@@ -673,8 +687,21 @@ public class DialogWriterService(IServiceScopeFactory scopeFactory, IWebHostEnvi
         conv.LastClusterId = fileIndex;
 
         var recipientId = cmd.AuthorId == conv.SellerId ? conv.BuyerId : conv.SellerId;
+
+        // Final safeguard: ensure sender still allowed to send to recipient (race-condition protection)
+        var blockService = scope.ServiceProvider.GetRequiredService<IBlockService>();
+        if (!await blockService.CanSendAsync(cmd.AuthorId, recipientId))
+        {
+            // Do not persist delivery or send realtime notifications
+            // Rollback any DB changes for this conversation to keep consistency
+            // Note: dialog events already appended to WAL and jsonl; best-effort remove last WAL entry
+            throw new MessageRejectedException("blocked", "User is blocked");
+        }
+
         if (recipientId == conv.SellerId) conv.HasUnreadForSeller = true;
         else conv.HasUnreadForBuyer = true;
+
+
 
         // Не изменяем lastSeen для автора при отправке — читаемое/непрочитанное определяется
         // по реальным сообщениям оппонента при подсчёте.
@@ -709,10 +736,21 @@ public class DialogWriterService(IServiceScopeFactory scopeFactory, IWebHostEnvi
         if (fullPayload.conversationId == 0)
             throw new InvalidOperationException("conversationId is required");
 
-        // Send to conversation group
-        await hub.Clients.Group($"conversation:{conv.Id}").SendAsync(HubEvents.Message, fullPayload);
-        // Also send to recipient user group as fallback
-        await hub.Clients.Group($"user:{recipientId}").SendAsync(HubEvents.Message, fullPayload);
+        // Send message only to participants who haven't deleted history up to this message
+        try
+        {
+            var participants = new[] { conv.SellerId, conv.BuyerId }.Distinct();
+            foreach (var u in participants)
+            {
+                var marker = u == conv.SellerId ? conv.SellerDeletedUpToMessageId : conv.BuyerDeletedUpToMessageId;
+                if (marker == null || message.Id > marker.Value)
+                {
+                    try { await hub.Clients.Group($"user:{u}").SendAsync(HubEvents.Message, fullPayload); } catch (Exception ex) { logger.LogWarning(ex, "Failed to notify user {UserId} about message", u); }
+                    try { await onlineHub.Clients.Group($"user:{u}").SendAsync(HubEvents.Message, fullPayload); } catch (Exception ex) { logger.LogWarning(ex, "Failed to notify online user {UserId} about message", u); }
+                }
+            }
+        }
+        catch (Exception ex) { logger.LogWarning(ex, "Per-recipient send failed"); }
 
         var fullConversation = await db.Conversations
             .AsNoTracking()

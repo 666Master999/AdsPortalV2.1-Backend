@@ -1,4 +1,5 @@
 using AdsPortalV2.Entities;
+using AdsPortalV2.Models;
 using Microsoft.EntityFrameworkCore;
 
 namespace AdsPortalV2.Data;
@@ -17,6 +18,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<Category> Categories => Set<Category>();
     public DbSet<Ad> Ads => Set<Ad>();
     public DbSet<AdImage> AdImages => Set<AdImage>();
+    public DbSet<FtsResult> FtsResults => Set<FtsResult>();
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
     public DbSet<Conversation> Conversations => Set<Conversation>();
     public DbSet<UserFavoriteAd> UserFavoriteAds => Set<UserFavoriteAd>();
@@ -101,6 +103,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         modelBuilder.Entity<Ad>().HasIndex(a => a.Price);
         modelBuilder.Entity<Ad>().HasIndex(a => a.CategoryId);
         modelBuilder.Entity<Ad>().HasIndex(a => new { a.Status, a.UserId });
+
+        modelBuilder.Entity<FtsResult>().HasNoKey();
 
         modelBuilder.Entity<AdImage>().HasOne(i => i.Ad).WithMany(a => a.Images).HasForeignKey(i => i.AdId).OnDelete(DeleteBehavior.Cascade);
 

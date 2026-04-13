@@ -9,7 +9,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using System.Linq.Expressions;
 using System.Text.Json;
-
+                // Placeholder edit to refresh context for relevance ordering change
 namespace AdsPortalV2.Controllers;
 
 [ApiController]
@@ -124,7 +124,7 @@ public class AdsController(
         return Ok(result);
     }
     [HttpGet]
-    public async Task<ActionResult<PagedResultDto<AdListItemDto>>> GetAll([FromQuery] AdsQuery q)
+    public async Task<ActionResult<PagedResultDto<AdListItemDto>>> GetAll([FromQuery] AdsQuery q, CancellationToken cancellationToken)
     {
         var page = Math.Max(1, q.Page);
         var pageSize = Math.Clamp(q.PageSize, 1, 50);
@@ -138,11 +138,16 @@ public class AdsController(
         if (!TryParseIds(q.Category, out var categoryIds))
             return BadRequest(new ApiError("validation_error", "Invalid category format. Expected comma-separated integers."));
 
-        var sort = string.IsNullOrWhiteSpace(q.Sort) ? "-createdAt" : q.Sort;
+        if (q.Search?.Length > 100)
+            return BadRequest(new ApiError("validation_error", "Search query is too long. Maximum is 100 characters."));
+
+        var sort = string.IsNullOrWhiteSpace(q.Sort)
+            ? (string.IsNullOrWhiteSpace(q.Search) ? "-createdAt" : "-relevance")
+            : q.Sort;
         var descending = sort.StartsWith('-');
         var sortKey = descending ? sort[1..] : sort;
 
-        if (!_sortMap.TryGetValue(sortKey, out var sortExpr))
+        if (!sortKey.Equals(AdFieldNames.Relevance, StringComparison.OrdinalIgnoreCase) && !_sortMap.ContainsKey(sortKey))
             return BadRequest(new ApiError("validation_error", $"Unknown sort field: '{sortKey}'."));
 
         AdStatus? status = null;
@@ -158,45 +163,21 @@ public class AdsController(
         var hasViewHidden = (await _authorizationService.AuthorizeAsync(User, null, AuthorizationPolicies.CanViewHiddenAd)).Succeeded;
 
         var query = await _adVisibility.ApplyVisibilityAsync(db.Ads.AsNoTracking(), currentUserId);
+        var result = await _adQueryService.BuildQueryAsync(
+            query,
+            q,
+            locationIds,
+            categoryIds,
+            status,
+            page,
+            pageSize,
+            sortKey,
+            descending,
+            currentUserId,
+            hasViewHidden,
+            cancellationToken);
 
-        query = await _adQueryService.BuildQueryAsync(query, q, locationIds, categoryIds, status);
-        query = descending ? query.OrderByDescending(sortExpr) : query.OrderBy(sortExpr);
-
-        if (!sortKey.Equals("createdAt", StringComparison.OrdinalIgnoreCase))
-            query = ((IOrderedQueryable<Ad>)query).ThenByDescending(ad => ad.CreatedAt);
-
-        var total = await query.CountAsync();
-        var totalPages = total == 0 ? 1 : (int)Math.Ceiling((double)total / pageSize);
-        page = Math.Min(page, totalPages);
-
-        var items = await query.Select(ad => new AdListItemDto
-        {
-            Id = ad.Id,
-            Title = ad.Title,
-            Description = ad.Description,
-            Price = ad.Price,
-            IsNegotiable = ad.IsNegotiable,
-            CategoryId = ad.CategoryId,
-            LocationId = ad.LocationId,
-            Location = ad.Location == null ? null : new LocationRef(
-                ad.Location.Type,
-                ad.Location.Id,
-                ad.Location.Name),
-            ListingType = ad.ListingType,
-            CreatedAt = ad.CreatedAt,
-            UpdatedAt = ad.UpdatedAt,
-            UserId = ad.UserId,
-            ViewsCount = ad.ViewsCount,
-            FavoritesCount = ad.FavoritesCount,
-            MainImagePath = EnsurePublicPath(db.AdImages
-                .Where(img => img.Id == ad.MainImageId)
-                .Select(img => img.FilePath)
-                .FirstOrDefault()),
-            IsFavorite = currentUserId.HasValue && db.UserFavoriteAds.Any(f => f.UserId == currentUserId.Value && f.AdId == ad.Id),
-            ModerationStatus = hasViewHidden || (currentUserId.HasValue && ad.UserId == currentUserId.Value) ? (AdStatus?)ad.Status : null
-        }).Skip((page - 1) * pageSize).Take(pageSize).ToListAsync();
-
-        return Ok(new PagedResultDto<AdListItemDto>(items, total, page, pageSize, totalPages));
+        return Ok(result);
     }
 
     [HttpGet("{id}")]
