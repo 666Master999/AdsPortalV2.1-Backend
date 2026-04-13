@@ -6,27 +6,31 @@ namespace AdsPortalV2.Services;
 
 public static class NotificationMapper
 {
-    public static NotificationDto ToDto(Notification notification, string? image) => new(
+    public static NotificationDto ToDto(Notification notification, string? image, string? adTitle) => new(
         notification.Id,
         notification.Type.ToString(),
         notification.IsRead,
         notification.CreatedAt,
+        notification.AdId,
+        adTitle,
         notification.Reason,
-        MergePreview(notification.PreviewJson, image),
-        Deserialize(notification.DataJson));
+        MergeMainImagePath(notification.PreviewJson, image),
+        MergeActorName(notification.DataJson));
 
     public static NotificationDto ToDto(Notification notification)
-        => ToDto(notification, null);
+        => ToDto(notification, null, null);
 
-    private static NotificationPreviewDto? MergePreview(string? json, string? image)
+    private static string? MergeMainImagePath(string? previewJson, string? image)
     {
-        var preview = DeserializePreview(json);
-        if (preview == null && image == null)
-            return null;
+        var preview = DeserializePreview(previewJson);
+        if (!string.IsNullOrEmpty(image)) return image;
+        return preview?.MainImagePath;
+    }
 
-        return preview is null
-            ? new NotificationPreviewDto(string.Empty, image)
-            : preview with { MainImagePath = image ?? preview.MainImagePath };
+    private static string? MergeActorName(string? dataJson)
+    {
+        var data = Deserialize(dataJson);
+        return data?.ActorName;
     }
 
     private static NotificationPreviewDto? DeserializePreview(string? json)

@@ -40,14 +40,24 @@ public class NotificationsController(AppDbContext db) : ControllerBase
                     Image = db.AdImages
                         .Where(i => i.Id == a.MainImageId)
                         .Select(i => i.FilePath)
-                        .FirstOrDefault()
+                        .FirstOrDefault(),
+                    a.Title
                 })
                 .ToDictionaryAsync(x => x.Id, x => x.Image);
+
+        Dictionary<int, string?> titlesByAdId = adIds.Count == 0
+            ? []
+            : await db.Ads
+                .AsNoTracking()
+                .Where(a => adIds.Contains(a.Id))
+                .Select(a => new { a.Id, a.Title })
+                .ToDictionaryAsync(x => x.Id, x => x.Title);
 
         var dto = notifications
             .Select(n => NotificationMapper.ToDto(
                 n,
-                n.AdId.HasValue && imagesByAdId.TryGetValue(n.AdId.Value, out var image) ? image : null))
+                n.AdId.HasValue && imagesByAdId.TryGetValue(n.AdId.Value, out var image) ? image : null,
+                n.AdId.HasValue && titlesByAdId.TryGetValue(n.AdId.Value, out var title) ? title : null))
             .ToList();
         return Ok(new NotificationsResultDto(dto));
     }

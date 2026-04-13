@@ -227,6 +227,8 @@ public class AdsController(
     {
         List<PatchIssueDto> issues = [];
         if (string.IsNullOrWhiteSpace(req.Title)) issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.Title, "Title is required."));
+        else if (req.Title.Trim().Length > 200) issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.Title, "Title is too long. Maximum is 200 characters."));
+        if (req.Price.HasValue && req.Price < 0) issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.Price, "Price must be non-negative."));
         if (!req.CategoryId.HasValue || req.CategoryId.Value <= 0) issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.CategoryId, "CategoryId is required."));
         if (!req.LocationId.HasValue || req.LocationId.Value <= 0) issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.LocationId, "LocationId is required."));
 
@@ -348,9 +350,72 @@ public class AdsController(
     {
         return new(StringComparer.OrdinalIgnoreCase)
         {
-            [AdFieldNames.Title] = v => PatchHelpers.UpdateString(v, ad.Title, x => ad.Title = x, AdFieldNames.Title, updated, skipped, errors),
+            [AdFieldNames.Title] = v =>
+            {
+                if (v.ValueKind is JsonValueKind.Undefined) return;
+                if (v.ValueKind is JsonValueKind.Null)
+                {
+                    errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.Title, "Title cannot be null."));
+                    return;
+                }
+                if (v.ValueKind is not JsonValueKind.String)
+                {
+                    errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.Title, "Title must be a string."));
+                    return;
+                }
+                var val = v.GetString()?.Trim();
+                if (string.IsNullOrWhiteSpace(val))
+                {
+                    errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.Title, "Title cannot be empty."));
+                    return;
+                }
+                if (val.Length > 200)
+                {
+                    errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.Title, "Title is too long. Maximum is 200 characters."));
+                    return;
+                }
+                if (string.Equals(val, ad.Title, StringComparison.Ordinal))
+                {
+                    skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, AdFieldNames.Title, "Title not changed."));
+                    return;
+                }
+                ad.Title = val;
+                updated.Add(AdFieldNames.Title);
+            },
             [AdFieldNames.Description] = v => PatchHelpers.UpdateNullableString(v, ad.Description, x => ad.Description = x, AdFieldNames.Description, updated, skipped, errors),
-            [AdFieldNames.Price] = v => PatchHelpers.UpdateNullableDecimal(v, ad.Price, x => ad.Price = x, AdFieldNames.Price, updated, skipped, errors),
+            [AdFieldNames.Price] = v =>
+            {
+                if (v.ValueKind is JsonValueKind.Undefined) return;
+                if (v.ValueKind is JsonValueKind.Null)
+                {
+                    // allow null
+                    if (ad.Price is null)
+                    {
+                        skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, AdFieldNames.Price, "Price not changed."));
+                        return;
+                    }
+                    ad.Price = null;
+                    updated.Add(AdFieldNames.Price);
+                    return;
+                }
+                if (!v.TryGetDecimal(out var dec))
+                {
+                    errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.Price, "Price must be a decimal."));
+                    return;
+                }
+                if (dec < 0)
+                {
+                    errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.Price, "Price must be non-negative."));
+                    return;
+                }
+                if (EqualityComparer<decimal?>.Default.Equals(dec, ad.Price))
+                {
+                    skipped.Add(new PatchIssueDto(PatchErrorCodes.Skipped, AdFieldNames.Price, "Price not changed."));
+                    return;
+                }
+                ad.Price = dec;
+                updated.Add(AdFieldNames.Price);
+            },
             [AdFieldNames.IsNegotiable] = v => PatchHelpers.UpdateBool(v, ad.IsNegotiable, x => ad.IsNegotiable = x, AdFieldNames.IsNegotiable, updated, skipped, errors),
             [AdFieldNames.CategoryId] = v => PatchHelpers.UpdateNullableInt(v, ad.CategoryId, x => ad.CategoryId = x, AdFieldNames.CategoryId, updated, skipped, errors),
             [AdFieldNames.ListingType] = v => PatchHelpers.UpdateString(v, ad.ListingType, x => ad.ListingType = x, AdFieldNames.ListingType, updated, skipped, errors),

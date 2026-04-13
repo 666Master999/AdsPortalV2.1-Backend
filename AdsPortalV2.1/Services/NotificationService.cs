@@ -14,25 +14,30 @@ public class NotificationService(AppDbContext db, IHubContext<SystemNotification
         await db.SaveChangesAsync(cancellationToken);
 
         string? image = null;
+        string? adTitle = null;
         if (notification.AdId.HasValue)
         {
-            var mainImageId = await db.Ads
+            var ad = await db.Ads
                 .AsNoTracking()
                 .Where(a => a.Id == notification.AdId.Value)
-                .Select(a => a.MainImageId)
+                .Select(a => new { a.MainImageId, a.Title })
                 .FirstOrDefaultAsync(cancellationToken);
 
-            if (mainImageId.HasValue)
+            if (ad != null)
             {
-                image = await db.AdImages
-                    .AsNoTracking()
-                    .Where(i => i.Id == mainImageId.Value)
-                    .Select(i => i.FilePath)
-                    .FirstOrDefaultAsync(cancellationToken);
+                adTitle = ad.Title;
+                if (ad.MainImageId.HasValue)
+                {
+                    image = await db.AdImages
+                        .AsNoTracking()
+                        .Where(i => i.Id == ad.MainImageId.Value)
+                        .Select(i => i.FilePath)
+                        .FirstOrDefaultAsync(cancellationToken);
+                }
             }
         }
 
-        var dto = NotificationMapper.ToDto(notification, image);
+        var dto = NotificationMapper.ToDto(notification, image, adTitle);
         await hub.Clients.Group($"user:{notification.UserId}").SendAsync("notificationCreated", dto, cancellationToken);
     }
 }

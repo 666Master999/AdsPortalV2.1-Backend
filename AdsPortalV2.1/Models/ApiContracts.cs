@@ -72,9 +72,11 @@ public sealed record NotificationDto(
     string Type,
     bool IsRead,
     DateTime CreatedAt,
+    int? AdId,
+    string? AdTitle,
     string? Reason,
-    NotificationPreviewDto? Preview,
-    NotificationDataDto? Data);
+    string? MainImagePath,
+    string? ActorName);
 
 public sealed record NotificationsResultDto(IReadOnlyCollection<NotificationDto> Items);
 
