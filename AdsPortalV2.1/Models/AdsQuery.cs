@@ -5,6 +5,7 @@ public class AdsQuery
     public string? Search { get; set; }
     public string? Location { get; set; }
     public string? Category { get; set; }
+    public bool IncludeChildren { get; set; } = false;
     public decimal? PriceFrom { get; set; }
     public decimal? PriceTo { get; set; }
     public DateOnly? DateFrom { get; set; }

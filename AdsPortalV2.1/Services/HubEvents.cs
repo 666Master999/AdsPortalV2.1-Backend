@@ -4,6 +4,8 @@ public static class HubEvents
 {
     // Realtime events (single current contract - no versions)
     public const string Message = "chat:message";
+    // Notification intent event: client decides whether to show banner/sound based on IsMuted
+    public const string MessageNotificationCandidate = "chat:messageNotificationCandidate";
     public const string ConversationUpdated = "chat:conversationUpdated";
     public const string Read = "chat:read";
     public const string Typing = "chat:typing";

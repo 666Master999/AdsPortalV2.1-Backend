@@ -277,7 +277,7 @@ public class ConversationsController(
             // do not receive old messages.
             var conv = await db.Conversations.AsNoTracking()
                 .Where(c => c.Id == conversationId)
-                .Select(c => new { c.Id, c.SellerId, c.BuyerId, c.SellerDeletedUpToMessageId, c.BuyerDeletedUpToMessageId })
+                .Select(c => new { c.Id, c.SellerId, c.BuyerId, c.SellerDeletedUpToMessageId, c.BuyerDeletedUpToMessageId, c.IsMutedForSeller, c.IsMutedForBuyer })
                 .FirstOrDefaultAsync();
 
             if (conv != null)
@@ -288,8 +288,13 @@ public class ConversationsController(
                     var marker = u == conv.SellerId ? conv.SellerDeletedUpToMessageId : conv.BuyerDeletedUpToMessageId;
                     if (marker == null || msg.Id > marker.Value)
                     {
-                        try { await notificationHub.Clients.Group($"user:{u}").SendAsync(HubEvents.Message, convMessage); } catch { }
+                        // Always send the message event (delivery)
                         try { await onlineHub.Clients.Group($"user:{u}").SendAsync(HubEvents.Message, convMessage); } catch { }
+
+                        // Emit notification intent event separately. Include IsMuted flag so client decides presentation.
+                        bool isMuted = (u == conv.SellerId) ? conv.IsMutedForSeller : conv.IsMutedForBuyer;
+                        var candidate = new MessageNotificationCandidateEvent(conversationId, msg.Id, msg.AuthorId, msg.CreatedAt, isMuted);
+                        try { await notificationHub.Clients.Group($"user:{u}").SendAsync(HubEvents.MessageNotificationCandidate, candidate); } catch { }
                     }
                 }
             }

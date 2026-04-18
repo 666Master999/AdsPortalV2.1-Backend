@@ -30,6 +30,10 @@ public sealed class AdDetailsService(AppDbContext db, PermissionService permissi
                 a.RejectionReason,
                 a.DeletedAt,
                 Category = a.Category == null ? null : new AdCategoryDto(a.Category.Id, a.Category.Name, a.Category.ParentId),
+                AttributeValues = a.AttributeValues
+                    .OrderBy(v => v.Id)
+                    .Select(v => new AdAttributeValueDto(v.AttributeId, v.Attribute.Name, v.Attribute.Type, v.Value))
+                    .ToList(),
                 User = a.User == null ? null : new AdOwnerDto(
                     a.User.Id,
                     a.User.UserLogin,
@@ -80,6 +84,7 @@ public sealed class AdDetailsService(AppDbContext db, PermissionService permissi
             ad.Category,
             ad.User,
             images,
+            ad.AttributeValues,
             favoriteIds.Contains(ad.Id));
 
         if (dto.User is null)

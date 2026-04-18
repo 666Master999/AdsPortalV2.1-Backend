@@ -13,15 +13,14 @@ namespace AdsPortalV2.Controllers;
 [ApiController]
 [Route("admin")]
 [Authorize]
-public class AdminController(AppDbContext db, PermissionService perms, IDomainEventPublisher events, INotificationFactory notificationFactory, INotificationService notifications) : ControllerBase
+public class AdminController(AppDbContext db, PermissionService perms, INotificationFactory notificationFactory, INotificationService notifications, IModerationService moderationService) : ControllerBase
 {
     [Authorize(Policy = AuthorizationPolicies.CanViewHiddenAd)]
     [HttpGet("ads")]
-    public async Task<ActionResult<PagedResultDto<AdminAdListItemDto>>> GetAds([FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] string? status = null)
+    public async Task<ActionResult<PagedResultDto<AdminAdListItemDto>>> GetAds([FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] string? status = null, [FromQuery] string? sort = null)
     {
         pageSize = Math.Clamp(pageSize, 1, 50);
-
-        var query = db.Ads.AsNoTracking();
+        var baseQuery = db.Ads.AsNoTracking();
         if (!string.IsNullOrWhiteSpace(status))
         {
             var set = status.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -30,38 +29,78 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
                 .Select(x => x!.Value)
                 .ToHashSet();
             if (set.Count > 0)
-                query = query.Where(a => set.Contains((AdStatus)a.Status));
+                baseQuery = baseQuery.Where(a => set.Contains((AdStatus)a.Status));
         }
 
-        var total = await query.CountAsync();
+        var total = await baseQuery.CountAsync();
         var totalPages = total == 0 ? 1 : (int)Math.Ceiling((double)total / pageSize);
         page = Math.Min(page, totalPages);
-        var ads = await query
-            .OrderByDescending(a => a.CreatedAt)
-            .Skip((page - 1) * pageSize)
-            .Take(pageSize)
-            .Select(a => new AdminAdListItemDto(
-                a.Id,
-                a.UserId,
-                a.CategoryId,
-                a.Title,
-                a.Description,
-                a.Price,
-                a.ListingType,
-                a.IsNegotiable,
-                a.LocationId,
-                a.CreatedAt,
-                a.UpdatedAt,
-                a.Status,
-                a.RejectionReason,
-                a.DeletedAt,
-                a.ViewsCount,
-                a.FavoritesCount,
-                a.User == null ? null : new AdminAdOwnerDto(a.User.Id, a.User.UserLogin, a.User.UserName, a.User.AvatarPath),
-                a.Category == null ? null : new AdCategoryDto(a.Category.Id, a.Category.Name, a.Category.ParentId),
-                a.Location == null ? null : new LocationRef(a.Location.Type, a.Location.Id, a.Location.Name),
-                a.Images.OrderBy(img => img.SortOrder).Select(img => img.FilePath).FirstOrDefault()))
-            .ToListAsync();
+
+        var sortByReports = string.Equals(sort, "reports", StringComparison.OrdinalIgnoreCase) || string.Equals(sort, "reports_desc", StringComparison.OrdinalIgnoreCase);
+
+        List<AdminAdListItemDto> ads;
+        if (sortByReports)
+        {
+            // group join to compute reports count per ad, ordered descending
+            var grouped = baseQuery.GroupJoin(db.Reports, a => a.Id, r => r.AdId, (a, rs) => new { Ad = a, ReportsCount = rs.Count() });
+
+            ads = await grouped
+                .OrderByDescending(x => x.ReportsCount)
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
+                .Select(x => x.Ad)
+                .Select(a => new AdminAdListItemDto(
+                    a.Id,
+                    a.UserId,
+                    a.CategoryId,
+                    a.Title,
+                    a.Description,
+                    a.Price,
+                    a.ListingType,
+                    a.IsNegotiable,
+                    a.LocationId,
+                    a.CreatedAt,
+                    a.UpdatedAt,
+                    a.Status,
+                    a.RejectionReason,
+                    a.DeletedAt,
+                    a.ViewsCount,
+                    a.FavoritesCount,
+                    a.User == null ? null : new AdminAdOwnerDto(a.User.Id, a.User.UserLogin, a.User.UserName, a.User.AvatarPath),
+                    a.Category == null ? null : new AdCategoryDto(a.Category.Id, a.Category.Name, a.Category.ParentId),
+                    a.Location == null ? null : new LocationRef(a.Location.Type, a.Location.Id, a.Location.Name),
+                    a.Images.OrderBy(img => img.SortOrder).Select(img => img.FilePath).FirstOrDefault()))
+                .ToListAsync();
+        }
+        else
+        {
+            ads = await baseQuery
+                .OrderByDescending(a => a.CreatedAt)
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
+                .Select(a => new AdminAdListItemDto(
+                    a.Id,
+                    a.UserId,
+                    a.CategoryId,
+                    a.Title,
+                    a.Description,
+                    a.Price,
+                    a.ListingType,
+                    a.IsNegotiable,
+                    a.LocationId,
+                    a.CreatedAt,
+                    a.UpdatedAt,
+                    a.Status,
+                    a.RejectionReason,
+                    a.DeletedAt,
+                    a.ViewsCount,
+                    a.FavoritesCount,
+                    a.User == null ? null : new AdminAdOwnerDto(a.User.Id, a.User.UserLogin, a.User.UserName, a.User.AvatarPath),
+                    a.Category == null ? null : new AdCategoryDto(a.Category.Id, a.Category.Name, a.Category.ParentId),
+                    a.Location == null ? null : new LocationRef(a.Location.Type, a.Location.Id, a.Location.Name),
+                    a.Images.OrderBy(img => img.SortOrder).Select(img => img.FilePath).FirstOrDefault()))
+                .ToListAsync();
+        }
 
         return Ok(new PagedResultDto<AdminAdListItemDto>(ads, total, page, pageSize, totalPages));
     }
@@ -175,9 +214,9 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
             NewValue = logValue
         });
 
+        user.MarkBanned(actorId);
         await db.SaveChangesAsync();
         perms.InvalidateCache(id);
-        events.Publish(new UserBanned(id, actorId));
 
         return Ok(new RestrictionActionDto(id, typeName, reason, expiresAt, rType == RestrictionType.LoginBan));
     }
@@ -243,9 +282,10 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
             NewValue = dto.Role
         });
 
+        // raise domain event on the affected aggregate (User) so SaveChanges interceptor will materialize it into Outbox
+        user.MarkRoleAssigned(dto.Role, actorId);
         await db.SaveChangesAsync();
         perms.InvalidateCache(id);
-        events.Publish(new RoleAssigned(id, dto.Role, actorId));
 
         return Ok(new RoleActionDto(id, dto.Role));
     }
@@ -288,30 +328,9 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
     public async Task<ActionResult<AdStatusActionDto>> ApproveAd(int id, CancellationToken cancellationToken)
     {
         if (!User.TryGetUserId(out var actorId)) return Unauthorized();
-
-        var ad = await db.Ads.FirstOrDefaultAsync(a => a.Id == id, cancellationToken);
-        if (ad == null) return NotFound();
-
-        var actorName = await db.Users
-            .AsNoTracking()
-            .Where(u => u.Id == actorId)
-            .Select(u => u.UserName ?? u.UserLogin)
-            .FirstAsync(cancellationToken);
-
-        var old = ad.Status;
-        ad.Status = AdStatus.Active;
-        ad.RejectionReason = null;
-        ad.UpdatedAt = DateTime.UtcNow;
-
-        db.AuditLogs.Add(new AuditLog { ActorUserId = actorId, TargetUserId = ad.UserId, Action = "ad.approve", TargetType = "Ad", TargetId = id, OldValue = old.ToString(), NewValue = "Active" });
-
-        var notification = notificationFactory.CreateAdApproved(ad.UserId, ad.Id, ad.Title, actorName);
-
-        await db.SaveChangesAsync(cancellationToken);
-
-        await notifications.SendAsync(notification, cancellationToken);
-        events.Publish(new AdApproved(id, actorId));
-        return Ok(new AdStatusActionDto(id, (AdStatus)ad.Status));
+        var result = await moderationService.ApproveAd(id, actorId, cancellationToken);
+        if (result == null) return NotFound();
+        return Ok(result);
     }
 
     [Authorize(Policy = AuthorizationPolicies.CanModerateAd)]
@@ -319,32 +338,12 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
     public async Task<ActionResult<AdStatusActionDto>> RejectAd(int id, [FromBody] JsonElement body)
     {
         if (!User.TryGetUserId(out var actorId)) return Unauthorized();
-
-        var ad = await db.Ads.FindAsync(id);
-        if (ad == null) return NotFound();
-
-        var actorName = await db.Users
-            .AsNoTracking()
-            .Where(u => u.Id == actorId)
-            .Select(u => u.UserName ?? u.UserLogin)
-            .FirstAsync();
         var reason = GetString(body, "reason");
         var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "Не указана" : reason.Trim();
-        var rejectedAt = DateTime.UtcNow;
 
-        var old = ad.Status;
-        ad.Status = AdStatus.Rejected;
-        ad.RejectionReason = normalizedReason;
-        ad.UpdatedAt = rejectedAt;
-
-        db.AuditLogs.Add(new AuditLog { ActorUserId = actorId, TargetUserId = ad.UserId, Action = "ad.reject", TargetType = "Ad", TargetId = id, Reason = normalizedReason, OldValue = old.ToString(), NewValue = "Rejected" });
-
-        var notification = notificationFactory.CreateAdRejected(ad.UserId, ad.Id, ad.Title, normalizedReason, actorName);
-
-        await db.SaveChangesAsync();
-        await notifications.SendAsync(notification);
-        events.Publish(new AdRejected(id, actorId, normalizedReason));
-        return Ok(new AdStatusActionDto(id, (AdStatus)ad.Status));
+        var result = await moderationService.RejectAd(id, normalizedReason, actorId);
+        if (result == null) return NotFound();
+        return Ok(result);
     }
 
     [Authorize(Policy = AuthorizationPolicies.CanModerateAd)]
@@ -359,8 +358,11 @@ public class AdminController(AppDbContext db, PermissionService perms, IDomainEv
         ad.Status = AdStatus.PendingModeration;
         ad.UpdatedAt = DateTime.UtcNow;
 
-        db.AuditLogs.Add(new AuditLog { ActorUserId = actorId, TargetUserId = ad.UserId, Action = "ad.send_to_moderation", TargetType = "Ad", TargetId = id });
+        // raise domain event on aggregate; persist outbox in same transaction
+        ad.MarkCreated(ad.UserId);
+        db.MaterializeDomainEvents();
         await db.SaveChangesAsync();
+        db.ClearDomainEvents();
         return Ok(new AdStatusActionDto(id, (AdStatus)ad.Status));
     }
 

@@ -25,6 +25,8 @@ public sealed record ConversationAdDto(
     int Id,
     string Title,
     string? MainImagePath,
+    decimal? Price,
+    bool IsNegotiable,
     AdStatus Status);
 
 public sealed record ConversationLastMessageDto(
@@ -59,6 +61,8 @@ public static class ConversationDtoBuilder
                 conversation.Ad.Id,
                 conversation.Ad.Title,
                 FilePathHelpers.EnsurePublicPath(conversation.Ad.Images.FirstOrDefault(img => img.Id == conversation.Ad.MainImageId)?.FilePath),
+                conversation.Ad.Price,
+                conversation.Ad.IsNegotiable,
                 conversation.Ad.Status),
             lastMessage,
             unreadCount,

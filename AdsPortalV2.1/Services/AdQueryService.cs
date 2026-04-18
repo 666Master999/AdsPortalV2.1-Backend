@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using System.Linq;
+using System.Linq.Expressions;
 using System.Globalization;
 using System.Text;
 using System;
@@ -13,10 +14,15 @@ namespace AdsPortalV2.Services;
 
 public class AdQueryService(AppDbContext db, IMemoryCache cache, ILogger<AdQueryService> logger)
 {
+    private readonly AdQueryFilterBuilder filterBuilder = new(db, cache);
+    private readonly AdSearchProvider searchProvider = new();
+    private readonly AdRankingService rankingService = new();
+    private readonly AdPaginationStrategy paginationStrategy = new(db);
+
     private const int MaxPageSize = 50;
     private const int MaxSearchTextLength = 100;
     private const int MaxSearchTokens = 10;
-    private const int RelevanceTokenLimit = 3;
+    private const int MaxSearchFallbackStages = 4;
     private const int SearchCountProbeLimit = 5001;
     private const int FavoriteQueryChunkSize = 1000;
     private const int FreshnessWindowDay1 = 1;
@@ -97,6 +103,7 @@ public class AdQueryService(AppDbContext db, IMemoryCache cache, ILogger<AdQuery
         AdsQuery q,
         int[] locationIds,
         int[] categoryIds,
+        IReadOnlyCollection<AdAttributeFilterDto> attributeFilters,
         AdStatus? status,
         int page,
         int pageSize,
@@ -109,11 +116,14 @@ public class AdQueryService(AppDbContext db, IMemoryCache cache, ILogger<AdQuery
         page = Math.Max(1, page);
         pageSize = Math.Clamp(pageSize, 1, MaxPageSize);
 
-        HashSet<int>? expandedLocations = null;
-        if (locationIds.Length > 0)
-            expandedLocations = await ExpandLocationIdsAsync(locationIds, cancellationToken);
-
-        query = ApplyBaseFilters(query.AsNoTracking(), q, expandedLocations, categoryIds, status);
+        var (filteredQuery, expandedLocations) = await filterBuilder.BuildBaseQueryAsync(
+            query,
+            q,
+            locationIds,
+            categoryIds,
+            attributeFilters,
+            status,
+            cancellationToken);
 
         var searchText = q.Search;
         if (!string.IsNullOrWhiteSpace(searchText) && searchText.Length > MaxSearchTextLength)
@@ -121,282 +131,125 @@ public class AdQueryService(AppDbContext db, IMemoryCache cache, ILogger<AdQuery
 
         var cursor = ParseCursor(q.Cursor);
         var useKeyset = cursor is not null && string.IsNullOrWhiteSpace(searchText) && (string.IsNullOrWhiteSpace(q.Sort) || q.Sort.Equals(AdFieldNames.CreatedAt, StringComparison.OrdinalIgnoreCase));
+        Func<IQueryable<Ad>, CancellationToken, Task<List<AdListItemDto>>> materializeAsync = async (source, ct) =>
+        {
+            var items = await ProjectToDto(source, currentUserId, hasViewHidden).ToListAsync(ct);
+            await ApplyFavoriteFlagsAsync(items, currentUserId, ct);
+            return items;
+        };
+
         if (string.IsNullOrWhiteSpace(searchText))
         {
             // browse mode: if cursor provided and sort is CreatedAt (or default), use keyset
             if (useKeyset)
-                return await BuildKeysetPageAsync(query, Array.Empty<string>(), false, descending, pageSize, cursor.Value, currentUserId, hasViewHidden, cancellationToken);
+                return await paginationStrategy.BuildKeysetPageAsync(filteredQuery, descending, pageSize, cursor.Value, materializeAsync, cancellationToken);
 
-            var countAll = await query.CountAsync(cancellationToken);
-            var ordered = ApplySort(query, sortKey, descending);
-            return await BuildPageAsync(ordered, countAll, page, pageSize, currentUserId, hasViewHidden, cancellationToken);
+            var countAll = await filteredQuery.CountAsync(cancellationToken);
+            var ordered = ApplySort(filteredQuery, sortKey, descending);
+            return await paginationStrategy.BuildOffsetPageAsync(ordered, countAll, page, pageSize, materializeAsync, cancellationToken);
         }
 
 
 
-        var tokens = GetSearchTokens(searchText, out var useOr);
+        var tokens = searchProvider.GetSearchTokens(searchText, out var useOr);
         if (tokens.Length == 0)
         {
-            var countAll = await query.CountAsync(cancellationToken);
-            var ordered = ApplySort(query, sortKey, descending);
-            return await BuildPageAsync(ordered, countAll, page, pageSize, currentUserId, hasViewHidden, cancellationToken);
+            var countAll = await filteredQuery.CountAsync(cancellationToken);
+            var ordered = ApplySort(filteredQuery, sortKey, descending);
+            return await paginationStrategy.BuildOffsetPageAsync(ordered, countAll, page, pageSize, materializeAsync, cancellationToken);
         }
 
-        var searchTokens = tokens.Select(t => t.ToLowerInvariant()).Take(RelevanceTokenLimit).ToArray();
         var requestedOffset = (page - 1) * pageSize;
-
-        // If a cursor is provided and sort is default (CreatedAt), use keyset pagination.
-        // `useKeyset` already computed above for browse; reuse it here.
-
-        if (sortKey.Equals(AdFieldNames.Relevance, StringComparison.OrdinalIgnoreCase))
-            return await BuildRelevancePageAsync(query, searchTokens, useOr, descending, page, pageSize, requestedOffset, currentUserId, hasViewHidden, q, expandedLocations, categoryIds, status, cancellationToken);
+        var ftsQuery = searchProvider.BuildFtsQuery(tokens, useOr);
 
         if (useKeyset)
-            return await BuildKeysetPageAsync(query, searchTokens, useOr, descending, pageSize, cursor.Value, currentUserId, hasViewHidden, cancellationToken);
+            return await paginationStrategy.BuildKeysetPageAsync(filteredQuery, descending, pageSize, cursor.Value, materializeAsync, cancellationToken);
 
-        // Non-relevance search: fallback to prefix filtering and exact count
-        var filtered = ApplySearchFilter(query, searchTokens, useOr);
-        var countSearch = await filtered.CountAsync(cancellationToken);
-        var pagesSearch = countSearch == 0 ? 1 : (int)Math.Ceiling((double)countSearch / pageSize);
-        page = Math.Min(page, pagesSearch);
-        var offsetSearch = (page - 1) * pageSize;
+        // Search mode: collect LIKE fallback candidates and merge them with FTS candidates.
+        var likeCandidates = await searchProvider.BuildSearchCandidatesQueryAsync(filteredQuery, tokens, cancellationToken);
+        var candidateIds = new HashSet<int>(await likeCandidates
+            .Select(ad => ad.Id)
+            .Take(SearchCountProbeLimit)
+            .ToListAsync(cancellationToken));
 
-        var orderedSearch = ApplySort(filtered, sortKey, descending);
-        return await BuildPageAsync(orderedSearch, countSearch, page, pageSize, currentUserId, hasViewHidden, cancellationToken);
-    }
+        Dictionary<int, int>? ftsRankMap = null;
 
-    private IQueryable<Ad> ApplyBaseFilters(
-        IQueryable<Ad> query,
-        AdsQuery q,
-        HashSet<int>? locationIds,
-        int[] categoryIds,
-        AdStatus? status)
-    {
-        if (locationIds is { Count: > 0 })
-            query = query.Where(x => locationIds.Contains(x.LocationId));
-
-        if (categoryIds.Length > 0)
-            query = query.Where(x => x.CategoryId.HasValue && categoryIds.Contains(x.CategoryId.Value));
-
-        if (!string.IsNullOrWhiteSpace(q.Type))
-            query = query.Where(x => x.ListingType == q.Type);
-
-        if (q.PriceFrom.HasValue)
-            query = query.Where(x => x.Price >= q.PriceFrom.Value);
-
-        if (q.PriceTo.HasValue)
-            query = query.Where(x => x.Price <= q.PriceTo.Value);
-
-        if (q.DateFrom.HasValue)
-            query = query.Where(x => x.CreatedAt >= q.DateFrom.Value.ToDateTime(TimeOnly.MinValue));
-
-        if (q.DateTo.HasValue)
-            query = query.Where(x => x.CreatedAt < q.DateTo.Value.AddDays(1).ToDateTime(TimeOnly.MinValue));
-
-        if (q.UserId.HasValue)
-            query = query.Where(x => x.UserId == q.UserId.Value);
-
-        if (status.HasValue)
-            query = query.Where(x => x.Status == status.Value);
-
-        return query;
-    }
-
-    private async Task<PagedResultDto<AdListItemDto>> BuildRelevancePageAsync(
-        IQueryable<Ad> query,
-        string[] tokens,
-        bool useOr,
-        bool descending,
-        int page,
-        int pageSize,
-        int offset,
-        int? currentUserId,
-        bool hasViewHidden,
-        AdsQuery q,
-        HashSet<int>? expandedLocations,
-        int[] categoryIds,
-        AdStatus? status,
-        CancellationToken cancellationToken)
-    {
-        var ftsQuery = BuildFtsQuery(tokens, useOr);
+        // Parse original requested category ids from query string (preserve exact requested ids before controller may have expanded them).
+        int[]? requestedCategoryIds = null;
+        if (!string.IsNullOrWhiteSpace(q.Category))
+        {
+            var parts = q.Category.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            var parsed = new List<int>();
+            foreach (var p in parts)
+            {
+                if (int.TryParse(p, out var id)) parsed.Add(id);
+            }
+            if (parsed.Count > 0)
+                requestedCategoryIds = parsed.Distinct().ToArray();
+        }
 
         if (!string.IsNullOrWhiteSpace(ftsQuery) && await IsFtsEnabledAsync())
         {
-            // Build WHERE clause from provided filters (category, location, status, price, dates, type, user)
-            string Escape(string s) => s.Replace("'", "''");
+            ftsRankMap = await paginationStrategy.GetFtsCandidateRanksAsync(
+                ftsQuery,
+                q,
+                expandedLocations,
+                categoryIds,
+                attributeFilters,
+                status,
+                SearchCountProbeLimit,
+                cancellationToken);
 
-            // Build parameterized SQL to avoid injection. We will construct a FormattableString via FormattableStringFactory.
-            var countSb = new StringBuilder();
-            var countArgs = new List<object>();
-            countSb.AppendLine("SELECT COUNT(*)");
-            countSb.AppendLine("FROM CONTAINSTABLE(dbo.Ads, (Title, Description), {0}, LANGUAGE 0) AS ft");
-            countSb.AppendLine("INNER JOIN dbo.Ads AS a ON a.Id = ft.[KEY]");
-            countArgs.Add(ftsQuery);
-            countSb.Append("WHERE 1=1");
-
-            if (categoryIds.Length > 0)
-                countSb.Append($" AND a.CategoryId IS NOT NULL AND a.CategoryId IN ({string.Join(", ", categoryIds)})");
-
-            if (expandedLocations is { Count: > 0 })
-                countSb.Append($" AND a.LocationId IN ({string.Join(", ", expandedLocations)})");
-
-            if (!string.IsNullOrWhiteSpace(q.Type))
-            {
-                countSb.Append($" AND a.ListingType = {{{countArgs.Count}}}");
-                countArgs.Add(q.Type);
-            }
-
-            if (q.PriceFrom.HasValue)
-            {
-                countSb.Append($" AND a.Price >= {{{countArgs.Count}}}");
-                countArgs.Add(q.PriceFrom.Value);
-            }
-
-            if (q.PriceTo.HasValue)
-            {
-                countSb.Append($" AND a.Price <= {{{countArgs.Count}}}");
-                countArgs.Add(q.PriceTo.Value);
-            }
-
-            if (q.DateFrom.HasValue)
-            {
-                countSb.Append($" AND a.CreatedAt >= {{{countArgs.Count}}}");
-                countArgs.Add(q.DateFrom.Value.ToDateTime(TimeOnly.MinValue));
-            }
-
-            if (q.DateTo.HasValue)
-            {
-                countSb.Append($" AND a.CreatedAt < {{{countArgs.Count}}}");
-                countArgs.Add(q.DateTo.Value.AddDays(1).ToDateTime(TimeOnly.MinValue));
-            }
-
-            if (q.UserId.HasValue)
-            {
-                countSb.Append($" AND a.UserId = {{{countArgs.Count}}}");
-                countArgs.Add(q.UserId.Value);
-            }
-
-            if (status.HasValue)
-            {
-                countSb.Append($" AND a.Status = {{{countArgs.Count}}}");
-                countArgs.Add((int)status.Value);
-            }
-
-            var countSqlTemplate = countSb.ToString();
-            var countSqlArgs = countArgs.ToArray();
-            var totalCount = await ExecuteScalarIntAsync(countSqlTemplate, countSqlArgs, cancellationToken);
-
-            var pages = totalCount == 0 ? 1 : (int)Math.Ceiling((double)totalCount / pageSize);
-            page = Math.Max(1, Math.Min(page, pages));
-            offset = (page - 1) * pageSize;
-            // Fetch ranked page of hits from FTS with same filters (parameterized)
-            var pageSb = new StringBuilder();
-            var pageArgs = new List<object>();
-            pageSb.AppendLine("SELECT a.Id AS Id, ft.[RANK] AS Rank");
-            pageSb.AppendLine("FROM dbo.Ads AS a");
-            pageSb.AppendLine("INNER JOIN CONTAINSTABLE(dbo.Ads, (Title, Description), {0}, LANGUAGE 0) AS ft");
-            pageSb.AppendLine("    ON a.Id = ft.[KEY]");
-            pageArgs.Add(ftsQuery);
-            pageSb.Append("WHERE 1=1");
-
-            if (categoryIds.Length > 0)
-                pageSb.Append($" AND a.CategoryId IS NOT NULL AND a.CategoryId IN ({string.Join(", ", categoryIds)})");
-
-            if (expandedLocations is { Count: > 0 })
-                pageSb.Append($" AND a.LocationId IN ({string.Join(", ", expandedLocations)})");
-
-            if (!string.IsNullOrWhiteSpace(q.Type))
-            {
-                pageSb.Append($" AND a.ListingType = {{{pageArgs.Count}}}");
-                pageArgs.Add(q.Type);
-            }
-
-            if (q.PriceFrom.HasValue)
-            {
-                pageSb.Append($" AND a.Price >= {{{pageArgs.Count}}}");
-                pageArgs.Add(q.PriceFrom.Value);
-            }
-
-            if (q.PriceTo.HasValue)
-            {
-                pageSb.Append($" AND a.Price <= {{{pageArgs.Count}}}");
-                pageArgs.Add(q.PriceTo.Value);
-            }
-
-            if (q.DateFrom.HasValue)
-            {
-                pageSb.Append($" AND a.CreatedAt >= {{{pageArgs.Count}}}");
-                pageArgs.Add(q.DateFrom.Value.ToDateTime(TimeOnly.MinValue));
-            }
-
-            if (q.DateTo.HasValue)
-            {
-                pageSb.Append($" AND a.CreatedAt < {{{pageArgs.Count}}}");
-                pageArgs.Add(q.DateTo.Value.AddDays(1).ToDateTime(TimeOnly.MinValue));
-            }
-
-            if (q.UserId.HasValue)
-            {
-                pageSb.Append($" AND a.UserId = {{{pageArgs.Count}}}");
-                pageArgs.Add(q.UserId.Value);
-            }
-
-            if (status.HasValue)
-            {
-                pageSb.Append($" AND a.Status = {{{pageArgs.Count}}}");
-                pageArgs.Add((int)status.Value);
-            }
-
-            pageSb.AppendLine("ORDER BY ft.[RANK] DESC, a.CreatedAt DESC, a.Id DESC");
-            pageSb.Append($" OFFSET {{{pageArgs.Count}}} ROWS FETCH NEXT {{{pageArgs.Count + 1}}} ROWS ONLY");
-            pageArgs.Add(offset);
-            pageArgs.Add(pageSize + 1);
-
-            var pageSqlTemplate = pageSb.ToString();
-            var pageSqlArgs = pageArgs.ToArray();
-
-            // Execute parameterized page query for FTS hits
-            var pageHits = await db.FtsResults
-                .FromSqlRaw(pageSqlTemplate, pageSqlArgs)
-                .AsNoTracking()
-                .ToListAsync(cancellationToken);
-
-            if (pageHits.Count > 0)
-            {
-                var pageSlice = pageHits.Take(pageSize).ToArray();
-                var pageIds = pageSlice.Select(x => x.Id).ToArray();
-                var rankMap = pageSlice.ToDictionary(x => x.Id, x => x.Rank);
-
-                if (pageIds.Length > 0)
-                {
-                    var items = await ProjectToDto(query.Where(ad => pageIds.Contains(ad.Id)), currentUserId, hasViewHidden).ToListAsync(cancellationToken);
-                    // FTS rank is meaningful only in descending order. Always order by rank DESC.
-                    var pageItems = items
-                        .OrderByDescending(item => rankMap[item.Id])
-                        .ThenByDescending(item => item.CreatedAt)
-                        .ThenByDescending(item => item.Id)
-                        .ToList();
-
-                    await ApplyFavoriteFlagsAsync(pageItems, currentUserId, cancellationToken);
-
-                    return new PagedResultDto<AdListItemDto>(pageItems, totalCount, page, pageSize, pages);
-                }
-            }
+            candidateIds.UnionWith(ftsRankMap.Keys);
         }
 
-        // Fallback: FTS not available or no ftsQuery -> count directly from filtered query and page normally
-        var ordered = descending
-            ? query.OrderByDescending(ad => ad.CreatedAt).ThenByDescending(ad => ad.Id)
-            : query.OrderBy(ad => ad.CreatedAt).ThenBy(ad => ad.Id);
+        if (candidateIds.Count == 0)
+            return new PagedResultDto<AdListItemDto>([], 0, page, pageSize, 1);
 
-        var fallbackTotal = await query.CountAsync(cancellationToken);
-        var fallbackPages = fallbackTotal == 0 ? 1 : (int)Math.Ceiling((double)fallbackTotal / pageSize);
-        page = Math.Max(1, Math.Min(page, fallbackPages));
-        offset = (page - 1) * pageSize;
+        var filtered = filteredQuery.Where(ad => candidateIds.Contains(ad.Id));
+        // Determine how many candidates to probe based on query length (longer queries -> wider probe)
+        var multiplier = tokens.Length <= 2 ? 5 : tokens.Length <= 4 ? 8 : 12;
+        var scanSize = Math.Min(1000, pageSize * multiplier);
 
-        var itemsFallback = await ProjectToDto(ordered.Skip(offset).Take(pageSize), currentUserId, hasViewHidden).ToListAsync(cancellationToken);
-        await ApplyFavoriteFlagsAsync(itemsFallback, currentUserId, cancellationToken);
-        return new PagedResultDto<AdListItemDto>(itemsFallback, fallbackTotal, page, pageSize, fallbackPages);
+        // First, load lightweight projection (Id, Title, Description, Price, CategoryId) to rank quickly.
+        var lightCandidates = await filtered
+            .Select(ad => new { ad.Id, ad.Title, ad.Description, ad.Price, ad.CategoryId })
+            .Take(scanSize)
+            .ToListAsync(cancellationToken);
+
+        // Map to minimal DTO for ranking (include description and price to improve ranking quality)
+        var minimalDtos = lightCandidates.Select(x => new AdListItemDto { Id = x.Id, Title = x.Title ?? string.Empty, Description = x.Description, Price = x.Price, CategoryId = x.CategoryId }).ToList();
+
+        var minimalRanked = rankingService.RankCandidates(
+            minimalDtos,
+            tokens,
+            searchText,
+            ftsRankMap,
+            requestedCategoryIds,
+            categoryIds.Length > 0 ? categoryIds : null);
+
+        // Decide how many top ids to materialize fully (balanced by pageSize and tokens)
+        var topTake = Math.Min(1000, pageSize * multiplier);
+        var topIds = minimalRanked.Select(x => x.Id).Take(topTake).ToArray();
+        var searchCandidates = await materializeAsync(filtered.Where(ad => topIds.Contains(ad.Id)), cancellationToken);
+        var rankedCandidates = rankingService.RankCandidates(
+            searchCandidates,
+            tokens,
+            searchText,
+            ftsRankMap,
+            requestedCategoryIds,
+            categoryIds.Length > 0 ? categoryIds : null);
+
+        var totalCount = rankedCandidates.Count;
+        var pagesSearch = totalCount == 0 ? 1 : (int)Math.Ceiling((double)totalCount / pageSize);
+        page = Math.Min(page, pagesSearch);
+        var offset = (page - 1) * pageSize;
+
+        var pageItems = rankedCandidates
+            .Skip(offset)
+            .Take(pageSize)
+            .ToList();
+        return new PagedResultDto<AdListItemDto>(pageItems, totalCount, page, pageSize, pagesSearch);
     }
 
     private static IQueryable<Ad> ApplySort(IQueryable<Ad> query, string sortKey, bool descending)
@@ -527,41 +380,6 @@ public class AdQueryService(AppDbContext db, IMemoryCache cache, ILogger<AdQuery
         });
     }
 
-    private static IQueryable<Ad> ApplySearchFilter(IQueryable<Ad> query, string[] tokens, bool useOr)
-    {
-        if (tokens.Length == 0)
-            return query;
-
-        if (useOr)
-        {
-            return tokens.Length switch
-            {
-                1 => query.Where(ad => ad.Title != null && ad.Title.StartsWith(tokens[0])),
-                2 => query.Where(ad => (ad.Title != null && ad.Title.StartsWith(tokens[0])) || (ad.Title != null && ad.Title.StartsWith(tokens[1]))),
-                _ => query.Where(ad => (ad.Title != null && ad.Title.StartsWith(tokens[0])) || (ad.Title != null && ad.Title.StartsWith(tokens[1])) || (ad.Title != null && ad.Title.StartsWith(tokens[2])))
-            };
-        }
-
-        foreach (var token in tokens)
-            query = query.Where(ad => ad.Title != null && ad.Title.StartsWith(token));
-
-        return query;
-    }
-
-    private static string[] GetSearchTokens(string search, out bool useOr)
-    {
-        var raw = search.Trim();
-        useOr = raw.Contains('|');
-
-        return (useOr
-                ? raw.Split('|', StringSplitOptions.RemoveEmptyEntries)
-                : raw.Split((char[])null, StringSplitOptions.RemoveEmptyEntries))
-            .Select(t => t.Trim())
-            .Where(t => t.Length is >= 2 and <= 50)
-            .Take(MaxSearchTokens)
-            .ToArray();
-    }
-
     public async Task<HashSet<int>> GetFavoriteIdsAsync(int? currentUserId, IEnumerable<int> adIds, CancellationToken cancellationToken = default)
     {
         if (!currentUserId.HasValue)
@@ -584,70 +402,5 @@ public class AdQueryService(AppDbContext db, IMemoryCache cache, ILogger<AdQuery
         }
 
         return result;
-    }
-
-    private async Task<HashSet<int>> ExpandLocationIdsAsync(int[] ids, CancellationToken cancellationToken)
-    {
-        var cacheKey = $"locations:tree:v1:{db.Database.GetDbConnection().DataSource}";
-        if (!cache.TryGetValue(cacheKey, out List<LocationNode>? allLocations))
-        {
-            allLocations = await db.Locations
-                .AsNoTracking()
-                .Select(l => new LocationNode { Id = l.Id, ParentId = l.ParentId })
-                .ToListAsync(cancellationToken);
-            cache.Set(cacheKey, allLocations, new MemoryCacheEntryOptions
-            {
-                AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(10)
-            });
-        }
-
-        // Cache children dictionary to avoid rebuilding it on every call
-        var childrenCacheKey = "locations:children:v1";
-        if (!cache.TryGetValue(childrenCacheKey, out Dictionary<int, int[]>? children))
-        {
-            children = allLocations
-                .Where(l => l.ParentId.HasValue)
-                .GroupBy(l => l.ParentId!.Value)
-                .ToDictionary(g => g.Key, g => g.Select(x => x.Id).ToArray());
-
-            cache.Set(childrenCacheKey, children, TimeSpan.FromMinutes(10));
-        }
-
-        var expanded = ids.ToHashSet();
-        var frontier = new Queue<int>(ids);
-
-        while (frontier.Count > 0)
-        {
-            if (!children.TryGetValue(frontier.Dequeue(), out var next))
-                continue;
-
-            foreach (var childId in next.Where(expanded.Add))
-                frontier.Enqueue(childId);
-        }
-
-        return expanded;
-    }
-
-    private async Task<PagedResultDto<AdListItemDto>> BuildPageAsync(
-        IQueryable<Ad> orderedQuery,
-        int totalCount,
-        int page,
-        int pageSize,
-        int? currentUserId,
-        bool hasViewHidden,
-        CancellationToken cancellationToken)
-    {
-        var pages = totalCount == 0 ? 1 : (int)Math.Ceiling((double)totalCount / pageSize);
-        page = Math.Min(page, pages);
-        var offset = (page - 1) * pageSize;
-        var items = await ProjectToDto(orderedQuery.Skip(offset).Take(pageSize), currentUserId, hasViewHidden).ToListAsync(cancellationToken);
-        await ApplyFavoriteFlagsAsync(items, currentUserId, cancellationToken);
-        return new PagedResultDto<AdListItemDto>(items, totalCount, page, pageSize, pages);
-    }
-
-    private sealed class LocationNode
-    {
-        public int Id { get; init; }
-        public int? ParentId { get; init; }
     }
 }

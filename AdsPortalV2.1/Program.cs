@@ -190,6 +190,7 @@ builder.Services.AddScoped<MessagePipeline>();
 builder.Services.AddScoped<IMessageMiddleware, BlockMiddleware>();
 builder.Services.AddScoped<AdQueryService>();
 builder.Services.AddScoped<AdVisibilityService>();
+builder.Services.AddScoped<ICategoryService, CategoryService>();
 builder.Services.AddScoped<IAdDetailsService, AdDetailsService>();
 builder.Services.AddScoped<ITokenService, TokenService>();
 builder.Services.AddScoped<PermissionService>();
@@ -197,7 +198,22 @@ builder.Services.AddScoped<IFileStorage, FileStorage>();
 builder.Services.AddScoped<IAdImagePatchService, AdImagePatchService>();
 builder.Services.AddScoped<INotificationFactory, NotificationFactory>();
 builder.Services.AddScoped<INotificationService, NotificationService>();
-builder.Services.AddSingleton<IDomainEventPublisher, DomainEventPublisher>();
+builder.Services.AddScoped<IModerationService, ModerationService>();
+builder.Services.AddScoped<DomainEventPublisher>();
+builder.Services.AddScoped<IDomainEventPublisher>(sp => sp.GetRequiredService<DomainEventPublisher>());
+builder.Services.AddScoped<IDomainEventBuffer>(sp => sp.GetRequiredService<DomainEventPublisher>());
+// Outbox infrastructure
+builder.Services.AddHostedService<AdsPortalV2.Services.Outbox.OutboxProcessor>();
+// domain event handlers
+builder.Services.AddScoped<AdsPortalV2.Services.Handlers.AuditHandler>();
+builder.Services.AddScoped<AdsPortalV2.Services.Handlers.NotificationHandler>();
+builder.Services.AddScoped<AdsPortalV2.Services.Handlers.FileDeletionHandler>();
+// register handlers for DI resolution by generic interface
+builder.Services.AddScoped<IDomainEventHandler<AdApproved>>(sp => sp.GetRequiredService<AdsPortalV2.Services.Handlers.AuditHandler>());
+builder.Services.AddScoped<IDomainEventHandler<AdRejected>>(sp => sp.GetRequiredService<AdsPortalV2.Services.Handlers.AuditHandler>());
+builder.Services.AddScoped<IDomainEventHandler<AdApproved>>(sp => sp.GetRequiredService<AdsPortalV2.Services.Handlers.NotificationHandler>());
+builder.Services.AddScoped<IDomainEventHandler<AdRejected>>(sp => sp.GetRequiredService<AdsPortalV2.Services.Handlers.NotificationHandler>());
+builder.Services.AddScoped<IDomainEventHandler<FileDeletionRequested>>(sp => sp.GetRequiredService<AdsPortalV2.Services.Handlers.FileDeletionHandler>());
 builder.Services.AddSingleton<IAuthorizationHandler, PermissionRequirementHandler>();
 builder.Services.AddScoped<IAuthorizationHandler, CanEditAdHandler>();
 builder.Services.AddScoped<IAuthorizationHandler, CanDeleteAdHandler>();

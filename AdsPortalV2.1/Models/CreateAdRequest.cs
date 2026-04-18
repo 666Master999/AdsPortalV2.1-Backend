@@ -23,6 +23,8 @@ public class CreateAdRequest
     [Required]
     public int? LocationId { get; set; }
 
+    public List<UpsertAdAttributeValueDto>? AttributeValues { get; set; }
+
     // Files are bound separately in controller; ignore in JSON serialization
     [JsonIgnore]
     public List<IFormFile>? Files { get; set; }

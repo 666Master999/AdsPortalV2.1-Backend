@@ -7,9 +7,10 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Primitives;
 using System.Linq.Expressions;
 using System.Text.Json;
-                // Placeholder edit to refresh context for relevance ordering change
+using Microsoft.AspNetCore.Http;
 namespace AdsPortalV2.Controllers;
 
 [ApiController]
@@ -20,11 +21,11 @@ public class AdsController(
     IMemoryCache _cache,
     ILogger<AdsController> _logger,
     AdQueryService _adQueryService,
+    ICategoryService _categoryService,
     AdVisibilityService _adVisibility,
     IAdDetailsService _adDetailsService,
     IAuthorizationService _authorizationService,
     PermissionService perms,
-    IDomainEventPublisher _events,
     INotificationFactory _notificationFactory,
     INotificationService _notifications,
     IAdImagePatchService _imagePatchService) : ControllerBase
@@ -34,12 +35,143 @@ public class AdsController(
     private static readonly Dictionary<string, Expression<Func<Ad, object?>>> _sortMap = new(StringComparer.OrdinalIgnoreCase)
     {
         [AdFieldNames.Title] = ad => ad.Title,
+        [AdFieldNames.CategoryId] = ad => ad.CategoryId,
         [AdFieldNames.Price] = ad => ad.Price,
         [AdFieldNames.CreatedAt] = ad => ad.CreatedAt,
         [AdFieldNames.UpdatedAt] = ad => ad.UpdatedAt,
         [AdFieldNames.Views] = ad => ad.ViewsCount,
         [AdFieldNames.Favorites] = ad => ad.FavoritesCount,
     };
+
+    private static readonly HashSet<string> ReservedQueryKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "search",
+        "location",
+        "category",
+        "includeChildren",
+        "priceFrom",
+        "priceTo",
+        "dateFrom",
+        "dateTo",
+        "userId",
+        "status",
+        "type",
+        "page",
+        "pageSize",
+        "sort",
+        "cursor"
+    };
+
+    private static IReadOnlyCollection<string> ParseQueryValues(StringValues values)
+    {
+        var parsed = new List<string>();
+        foreach (var raw in values)
+        {
+            foreach (var part in raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var value = part.Trim();
+                if (!string.IsNullOrWhiteSpace(value))
+                    parsed.Add(value);
+            }
+        }
+
+        return parsed
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static bool TryParseSlugFilters(
+        IQueryCollection query,
+        IReadOnlyDictionary<string, IReadOnlyCollection<CategoryAttributeDto>> attributeLookup,
+        out List<AdAttributeFilterDto> filters,
+        out string? error)
+    {
+        filters = [];
+        error = null;
+
+        var unknownKeys = query.Keys
+            .Where(key => !ReservedQueryKeys.Contains(key) && !attributeLookup.ContainsKey(key))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (unknownKeys.Length > 0)
+        {
+            error = $"Unknown filter key: '{unknownKeys[0]}'.";
+            return false;
+        }
+
+        var result = new List<AdAttributeFilterDto>();
+        foreach (var (slug, attributes) in attributeLookup)
+        {
+            if (!query.TryGetValue(slug, out var rawValues))
+                continue;
+
+            var values = ParseQueryValues(rawValues);
+            if (values.Count == 0)
+            {
+                error = $"Filter '{slug}' cannot be empty.";
+                return false;
+            }
+
+            var attributeIds = attributes.Select(a => a.Id).Distinct().ToArray();
+            foreach (var attribute in attributes)
+            {
+                if (!ValidateFilterValues(attribute, values, out var validationError))
+                {
+                    error = validationError;
+                    return false;
+                }
+            }
+
+            result.Add(new AdAttributeFilterDto(attributeIds, values));
+        }
+
+        filters = result;
+        return true;
+    }
+
+    private static bool ValidateFilterValues(CategoryAttributeDto attribute, IReadOnlyCollection<string> values, out string? error)
+    {
+        error = null;
+
+        foreach (var value in values)
+        {
+            switch (attribute.Type)
+            {
+                case AttributeType.Enum:
+                    if (!attribute.Options.Any(o => string.Equals(o.Value, value, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        error = $"Invalid value for filter '{attribute.Slug}'.";
+                        return false;
+                    }
+                    break;
+                case AttributeType.Int:
+                    if (!int.TryParse(value, out _))
+                    {
+                        error = $"Filter '{attribute.Slug}' must be an integer.";
+                        return false;
+                    }
+                    break;
+                case AttributeType.Decimal:
+                    if (!decimal.TryParse(value, System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out _) &&
+                        !decimal.TryParse(value, out _))
+                    {
+                        error = $"Filter '{attribute.Slug}' must be a decimal.";
+                        return false;
+                    }
+                    break;
+                case AttributeType.Bool:
+                    if (!bool.TryParse(value, out _))
+                    {
+                        error = $"Filter '{attribute.Slug}' must be a boolean.";
+                        return false;
+                    }
+                    break;
+            }
+        }
+
+        return true;
+    }
 
     // PATCH: /ads/{id}/moderation
     [Authorize(Policy = AuthorizationPolicies.CanModerateAd)]
@@ -54,13 +186,11 @@ public class AdsController(
             return NotFound();
 
         var previousStatus = ad.Status;
-        ad.Status = req.Status;
-        ad.UpdatedAt = DateTime.UtcNow;
 
-        Notification? notification = null;
+        string? actorName = null;
         if (req.Status != previousStatus && req.Status is AdStatus.Active or AdStatus.Rejected)
         {
-            var actorName = await db.Users
+            actorName = await db.Users
                 .AsNoTracking()
                 .Where(u => u.Id == actorId)
                 .Select(u => u.UserName ?? u.UserLogin)
@@ -71,27 +201,28 @@ public class AdsController(
             {
                 return BadRequest(new ApiError("validation_error", "Reason is required when rejecting an ad."));
             }
-            ad.RejectionReason = req.Reason;
 
-            notification = req.Status == AdStatus.Active
-                ? _notificationFactory.CreateAdApproved(ad.UserId, ad.Id, ad.Title, actorName)
-                : _notificationFactory.CreateAdRejected(ad.UserId, ad.Id, ad.Title, ad.RejectionReason ?? "Не указана", actorName);
+            if (req.Status == AdStatus.Active)
+            {
+                ad.Approve(actorId, actorName ?? string.Empty);
+            }
+            else
+            {
+                ad.Reject(actorId, req.Reason ?? string.Empty, actorName ?? string.Empty);
+            }
+        }
+        else
+        {
+            ad.Status = req.Status;
+            ad.UpdatedAt = DateTime.UtcNow;
         }
 
         await db.SaveChangesAsync(cancellationToken);
-        if (req.Status == AdStatus.Active)
-        {
-            _events.Publish(new AdApproved(ad.Id, actorId));
-        }
-        else if (req.Status == AdStatus.Rejected)
-        {
-            _events.Publish(new AdRejected(ad.Id, actorId, ad.RejectionReason));
-        }
+        try { _logger.LogWarning("CONTROLLER SAVED: AdId={AdId}", ad.Id); } catch {}
 
         Log.AdModeration(_logger, id, previousStatus, req.Status);
 
-        if (notification != null)
-            await _notifications.SendAsync(notification, cancellationToken);
+        // Notifications and audit logs are handled by domain event handlers.
 
         return Ok(new AdDto(ad.Id, ad.UserId, ad.CategoryId, ad.Title, ad.Description, ad.Price, ad.ListingType, ad.IsNegotiable,
             ad.LocationId, ad.CreatedAt, ad.UpdatedAt, (AdStatus)ad.Status, ad.RejectionReason, ad.DeletedAt, ad.ViewsCount, ad.FavoritesCount));
@@ -138,6 +269,40 @@ public class AdsController(
         if (!TryParseIds(q.Category, out var categoryIds))
             return BadRequest(new ApiError("validation_error", "Invalid category format. Expected comma-separated integers."));
 
+        if (q.IncludeChildren && categoryIds.Length > 0)
+        {
+            // Expand categories using category graph children lookup (expansion kept local to caller).
+            var graph = await _categoryService.GetGraphAsync(cancellationToken);
+            var expanded = new HashSet<int>(categoryIds);
+            var queue = new Queue<int>(categoryIds);
+
+            while (queue.Count > 0)
+            {
+                var id = queue.Dequeue();
+                if (!graph.ChildrenById.TryGetValue(id, out var children))
+                    continue;
+
+                foreach (var child in children)
+                {
+                    if (expanded.Add(child))
+                        queue.Enqueue(child);
+                }
+            }
+
+            categoryIds = expanded.ToArray();
+        }
+
+        var hasAttributeKeys = Request.Query.Keys.Any(key => !ReservedQueryKeys.Contains(key));
+        if (hasAttributeKeys && categoryIds.Length == 0)
+            return BadRequest(new ApiError("validation_error", "Category is required when attribute filters are used."));
+
+        var attributeLookup = categoryIds.Length == 0
+            ? new Dictionary<string, IReadOnlyCollection<CategoryAttributeDto>>(StringComparer.OrdinalIgnoreCase)
+            : await _categoryService.GetAttributeLookupAsync(categoryIds, onlyFilters: true, cancellationToken);
+
+        if (!TryParseSlugFilters(Request.Query, attributeLookup, out var attributeFilters, out var filterError))
+            return BadRequest(new ApiError("validation_error", filterError ?? "Invalid attribute filters."));
+
         if (q.Search?.Length > 100)
             return BadRequest(new ApiError("validation_error", "Search query is too long. Maximum is 100 characters."));
 
@@ -168,6 +333,7 @@ public class AdsController(
             q,
             locationIds,
             categoryIds,
+            attributeFilters,
             status,
             page,
             pageSize,
@@ -223,7 +389,8 @@ public class AdsController(
     public async Task<ActionResult<CreateAdResultDto>> Create(
         [FromForm] Models.CreateAdRequest req,
         [FromForm] List<IFormFile>? files,
-        [FromForm] int? mainImageIndex)
+        [FromForm] int? mainImageIndex,
+        CancellationToken cancellationToken = default)
     {
         List<PatchIssueDto> issues = [];
         if (string.IsNullOrWhiteSpace(req.Title)) issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.Title, "Title is required."));
@@ -231,6 +398,88 @@ public class AdsController(
         if (req.Price.HasValue && req.Price < 0) issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.Price, "Price must be non-negative."));
         if (!req.CategoryId.HasValue || req.CategoryId.Value <= 0) issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.CategoryId, "CategoryId is required."));
         if (!req.LocationId.HasValue || req.LocationId.Value <= 0) issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.LocationId, "LocationId is required."));
+
+        var category = req.CategoryId.HasValue && req.CategoryId.Value > 0
+            ? await db.Categories.AsNoTracking().FirstOrDefaultAsync(c => c.Id == req.CategoryId.Value)
+            : null;
+
+        if (req.CategoryId.HasValue && req.CategoryId.Value > 0 && category == null)
+            issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.CategoryId, "Category was not found."));
+
+        var attributeValues = new List<AdAttributeValue>();
+        if (category != null)
+        {
+            var categoryAttributes = await _categoryService.GetAttributesAsync(category.Id);
+
+            var providedValues = (req.AttributeValues ?? [])
+                .GroupBy(v => v.AttributeId)
+                .ToDictionary(g => g.Key, g => g.First());
+
+            foreach (var attribute in categoryAttributes)
+            {
+                if (!providedValues.TryGetValue(attribute.Id, out var provided))
+                {
+                    if (attribute.IsRequired)
+                        issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, $"attributeValues.{attribute.Id}", $"Attribute '{attribute.Name}' is required."));
+
+                    continue;
+                }
+
+                var rawValue = provided.Value?.Trim();
+                if (string.IsNullOrWhiteSpace(rawValue))
+                {
+                    issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, $"attributeValues.{attribute.Id}", $"Attribute '{attribute.Name}' cannot be empty."));
+                    continue;
+                }
+
+                if (attribute.Type == AttributeType.Enum)
+                {
+                    var allowed = attribute.Options.Select(o => o.Value).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    if (!allowed.Contains(rawValue))
+                    {
+                        issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, $"attributeValues.{attribute.Id}", $"Invalid value for attribute '{attribute.Name}'."));
+                        continue;
+                    }
+                }
+                else if (attribute.Type == AttributeType.Int)
+                {
+                    if (!int.TryParse(rawValue, out _))
+                    {
+                        issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, $"attributeValues.{attribute.Id}", $"Attribute '{attribute.Name}' must be an integer."));
+                        continue;
+                    }
+                }
+                else if (attribute.Type == AttributeType.Bool)
+                {
+                    if (!bool.TryParse(rawValue, out _))
+                    {
+                        issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, $"attributeValues.{attribute.Id}", $"Attribute '{attribute.Name}' must be a boolean."));
+                        continue;
+                    }
+                }
+                else if (attribute.Type == AttributeType.Decimal)
+                {
+                    if (!decimal.TryParse(rawValue, System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out _) &&
+                        !decimal.TryParse(rawValue, out _))
+                    {
+                        issues.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, $"attributeValues.{attribute.Id}", $"Attribute '{attribute.Name}' must be a decimal."));
+                        continue;
+                    }
+                }
+
+                attributeValues.Add(new AdAttributeValue
+                {
+                    AttributeId = attribute.Id,
+                    Value = rawValue
+                });
+            }
+
+            foreach (var provided in req.AttributeValues ?? [])
+            {
+                if (!categoryAttributes.Any(a => a.Id == provided.AttributeId))
+                    issues.Add(new PatchIssueDto(PatchErrorCodes.NotAllowed, $"attributeValues.{provided.AttributeId}", "Attribute is not allowed for the selected category."));
+            }
+        }
 
         if (issues.Count > 0)
             return BadRequest(new ApiError("validation_error", "Validation failed.", issues));
@@ -257,21 +506,42 @@ public class AdsController(
             Status = AdStatus.PendingModeration
         };
 
+        await using var tx = await db.Database.BeginTransactionAsync(cancellationToken);
+
         db.Ads.Add(ad);
-        await db.SaveChangesAsync();
-        _events.Publish(new AdCreated(ad.Id, creatorId));
+
+        if (attributeValues.Count > 0)
+        {
+            foreach (var value in attributeValues)
+                value.Ad = ad;
+
+            db.AdAttributeValues.AddRange(attributeValues);
+        }
+
+        // Persist ad first so EF assigns identity
+        await db.SaveChangesAsync(cancellationToken);
+
+        // Now raise domain event on aggregate (Ad.Id is available) and persist outbox entries
+        ad.MarkCreated(creatorId);
+        db.MaterializeDomainEvents();
+        await db.SaveChangesAsync(cancellationToken);
+
+        // Clear in-memory events after they were persisted to Outbox
+        db.ClearDomainEvents();
+
+        await tx.CommitAsync(cancellationToken);
 
         Log.AdCreated(_logger, ad.Id, creatorId);
 
-            if (files?.Count > 0)
-            {
-                var savedImages = await SaveAdImages(ad.Id, files, mainImageIndex);
-                var mainImageId = await db.Ads.Where(a => a.Id == ad.Id).Select(a => a.MainImageId).FirstOrDefaultAsync();
-                return Ok(new CreateAdResultDto(
-                    "Ad created with images successfully.",
-                    ad.Id,
-                    [.. savedImages.Select(img => new AdImageDto(img.Id, img.AdId, EnsurePublicPath(img.FilePath), img.SortOrder, img.Id == mainImageId))]));
-            }
+        if (files?.Count > 0)
+        {
+            var savedImages = await SaveAdImages(ad.Id, files, mainImageIndex);
+            var mainImageId = await db.Ads.Where(a => a.Id == ad.Id).Select(a => a.MainImageId).FirstOrDefaultAsync();
+            return Ok(new CreateAdResultDto(
+                "Ad created with images successfully.",
+                ad.Id,
+                [.. savedImages.Select(img => new AdImageDto(img.Id, img.AdId, EnsurePublicPath(img.FilePath), img.SortOrder, img.Id == mainImageId))]));
+        }
 
         return Ok(new CreateAdResultDto("Ad created successfully.", ad.Id));
     }
@@ -309,14 +579,14 @@ public class AdsController(
         if (ad == null)
             return NotFound();
 
-        if (!User.TryGetUserId(out _))
+        if (!User.TryGetUserId(out var currentUserId))
             return Unauthorized();
 
         var canEdit = (await _authorizationService.AuthorizeAsync(User, ad, AuthorizationPolicies.CanEditAd)).Succeeded;
         if (!canEdit)
             return Forbid();
 
-        HashSet<string> updated = [];
+        var updated = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         List<PatchIssueDto> skipped = [];
         List<PatchIssueDto> errors = [];
 
@@ -332,7 +602,43 @@ public class AdsController(
 
         ad.UpdatedAt = DateTime.UtcNow;
 
-        await db.SaveChangesAsync();
+        // If owner changed visible/critical fields, send ad back to moderation
+        var requiresModeration =
+            updated.Contains(AdFieldNames.Title) ||
+            updated.Contains(AdFieldNames.Description) ||
+            updated.Contains(AdFieldNames.Images);
+
+        if (requiresModeration)
+        {
+            ad.Status = AdStatus.PendingModeration;
+            ad.RejectionReason = null;
+            db.AuditLogs.Add(new AuditLog { ActorUserId = currentUserId, TargetUserId = ad.UserId, Action = "ad.send_to_moderation", TargetType = "Ad", TargetId = id });
+        }
+
+        try
+        {
+            await db.SaveChangesAsync();
+        }
+        catch (DbUpdateException ex)
+        {
+            try { _logger.LogError(ex, "Ad update save failed: AdId={AdId}", id); } catch {}
+
+            var env = HttpContext.RequestServices.GetRequiredService<IWebHostEnvironment>();
+            var msg = env.IsDevelopment() ? (ex.InnerException?.Message ?? ex.Message) : "Internal error while saving changes.";
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InternalError, null, msg));
+
+            // Return structured patch result with error details
+            return BadRequest(new PatchResultDto(false, updated, skipped, errors));
+        }
+        catch (Exception ex)
+        {
+            try { _logger.LogError(ex, "Unexpected error while saving ad update: AdId={AdId}", id); } catch {}
+
+            var env = HttpContext.RequestServices.GetRequiredService<IWebHostEnvironment>();
+            var msg = env.IsDevelopment() ? ex.Message : "Internal error while saving changes.";
+            errors.Add(new PatchIssueDto(PatchErrorCodes.InternalError, null, msg));
+            return BadRequest(new PatchResultDto(false, updated, skipped, errors));
+        }
 
         var success = errors.Count == 0;
         return success

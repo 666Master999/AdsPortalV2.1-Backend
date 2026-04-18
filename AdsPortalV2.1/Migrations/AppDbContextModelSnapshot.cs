@@ -40,8 +40,8 @@ namespace AdsPortalV2.Migrations
                         .HasColumnType("datetime2");
 
                     b.Property<string>("Description")
-                        .HasMaxLength(5000)
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
 
                     b.Property<int>("FavoritesCount")
                         .HasColumnType("int");
@@ -104,6 +104,35 @@ namespace AdsPortalV2.Migrations
                     b.ToTable("Ads");
                 });
 
+            modelBuilder.Entity("AdsPortalV2.Entities.AdAttributeValue", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("AdId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("AttributeId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Value")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AdId", "AttributeId")
+                        .IsUnique();
+
+                    b.HasIndex("AttributeId", "Value", "AdId");
+
+                    b.ToTable("AdAttributeValues");
+                });
+
             modelBuilder.Entity("AdsPortalV2.Entities.AdImage", b =>
                 {
                     b.Property<int>("Id")
@@ -150,6 +179,9 @@ namespace AdsPortalV2.Migrations
                     b.Property<string>("OldValue")
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<long?>("OutboxMessageId")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("Reason")
                         .HasColumnType("nvarchar(max)");
 
@@ -180,18 +212,94 @@ namespace AdsPortalV2.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
 
+                    b.Property<bool>("IsLeaf")
+                        .HasColumnType("bit");
+
                     b.Property<string>("Name")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
 
                     b.Property<int?>("ParentId")
                         .HasColumnType("int");
+
+                    b.Property<string>("Path")
+                        .HasMaxLength(1000)
+                        .HasColumnType("nvarchar(1000)");
 
                     b.HasKey("Id");
 
                     b.HasIndex("ParentId");
 
+                    b.HasIndex("Path");
+
+                    b.HasIndex("ParentId", "Name")
+                        .IsUnique()
+                        .HasFilter("[ParentId] IS NOT NULL");
+
                     b.ToTable("Categories");
+                });
+
+            modelBuilder.Entity("AdsPortalV2.Entities.CategoryAttribute", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("CategoryId")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("IsFilter")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("IsRequired")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("Slug")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<byte>("Type")
+                        .HasColumnType("tinyint");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CategoryId", "Slug")
+                        .IsUnique();
+
+                    b.ToTable("CategoryAttributes");
+                });
+
+            modelBuilder.Entity("AdsPortalV2.Entities.CategoryAttributeOption", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("CategoryAttributeId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Value")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CategoryAttributeId", "Value")
+                        .IsUnique();
+
+                    b.ToTable("CategoryAttributeOptions");
                 });
 
             modelBuilder.Entity("AdsPortalV2.Entities.Conversation", b =>
@@ -327,6 +435,9 @@ namespace AdsPortalV2.Migrations
                     b.Property<bool>("IsRead")
                         .HasColumnType("bit");
 
+                    b.Property<long?>("OutboxMessageId")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("PreviewJson")
                         .HasColumnType("nvarchar(max)");
 
@@ -348,6 +459,51 @@ namespace AdsPortalV2.Migrations
                     b.ToTable("Notifications");
                 });
 
+            modelBuilder.Entity("AdsPortalV2.Entities.OutboxMessage", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<int>("AttemptCount")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime?>("AvailableAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("EventId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("LastError")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("PayloadJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("ProcessedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("EventId")
+                        .IsUnique();
+
+                    b.ToTable("OutboxMessages");
+                });
+
             modelBuilder.Entity("AdsPortalV2.Entities.Permission", b =>
                 {
                     b.Property<int>("Id")
@@ -363,6 +519,35 @@ namespace AdsPortalV2.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("Permissions");
+                });
+
+            modelBuilder.Entity("AdsPortalV2.Entities.Report", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("AdId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Description")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("Reason")
+                        .HasColumnType("int");
+
+                    b.Property<int>("ReporterId")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AdId", "ReporterId")
+                        .IsUnique();
+
+                    b.ToTable("Reports");
                 });
 
             modelBuilder.Entity("AdsPortalV2.Entities.Role", b =>
@@ -669,6 +854,25 @@ namespace AdsPortalV2.Migrations
                     b.Navigation("User");
                 });
 
+            modelBuilder.Entity("AdsPortalV2.Entities.AdAttributeValue", b =>
+                {
+                    b.HasOne("AdsPortalV2.Entities.Ad", "Ad")
+                        .WithMany("AttributeValues")
+                        .HasForeignKey("AdId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("AdsPortalV2.Entities.CategoryAttribute", "Attribute")
+                        .WithMany("AdValues")
+                        .HasForeignKey("AttributeId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Ad");
+
+                    b.Navigation("Attribute");
+                });
+
             modelBuilder.Entity("AdsPortalV2.Entities.AdImage", b =>
                 {
                     b.HasOne("AdsPortalV2.Entities.Ad", "Ad")
@@ -695,9 +899,32 @@ namespace AdsPortalV2.Migrations
                 {
                     b.HasOne("AdsPortalV2.Entities.Category", "Parent")
                         .WithMany("Children")
-                        .HasForeignKey("ParentId");
+                        .HasForeignKey("ParentId")
+                        .OnDelete(DeleteBehavior.Restrict);
 
                     b.Navigation("Parent");
+                });
+
+            modelBuilder.Entity("AdsPortalV2.Entities.CategoryAttribute", b =>
+                {
+                    b.HasOne("AdsPortalV2.Entities.Category", "Category")
+                        .WithMany("Attributes")
+                        .HasForeignKey("CategoryId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Category");
+                });
+
+            modelBuilder.Entity("AdsPortalV2.Entities.CategoryAttributeOption", b =>
+                {
+                    b.HasOne("AdsPortalV2.Entities.CategoryAttribute", "CategoryAttribute")
+                        .WithMany("Options")
+                        .HasForeignKey("CategoryAttributeId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("CategoryAttribute");
                 });
 
             modelBuilder.Entity("AdsPortalV2.Entities.Conversation", b =>
@@ -753,6 +980,15 @@ namespace AdsPortalV2.Migrations
                     b.Navigation("Ad");
 
                     b.Navigation("User");
+                });
+
+            modelBuilder.Entity("AdsPortalV2.Entities.Report", b =>
+                {
+                    b.HasOne("AdsPortalV2.Entities.Ad", null)
+                        .WithMany()
+                        .HasForeignKey("AdId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("AdsPortalV2.Entities.RolePermission", b =>
@@ -874,6 +1110,8 @@ namespace AdsPortalV2.Migrations
 
             modelBuilder.Entity("AdsPortalV2.Entities.Ad", b =>
                 {
+                    b.Navigation("AttributeValues");
+
                     b.Navigation("Conversations");
 
                     b.Navigation("Images");
@@ -883,7 +1121,16 @@ namespace AdsPortalV2.Migrations
                 {
                     b.Navigation("Ads");
 
+                    b.Navigation("Attributes");
+
                     b.Navigation("Children");
+                });
+
+            modelBuilder.Entity("AdsPortalV2.Entities.CategoryAttribute", b =>
+                {
+                    b.Navigation("AdValues");
+
+                    b.Navigation("Options");
                 });
 
             modelBuilder.Entity("AdsPortalV2.Entities.Location", b =>

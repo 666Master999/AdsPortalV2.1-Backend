@@ -20,8 +20,7 @@ public class FileStorage : IFileStorage
             return;
 
         var fullPath = Path.Combine(Root, normalizedRelativePath);
-        if (File.Exists(fullPath))
-            File.Delete(fullPath);
+        File.Delete(fullPath);
     }
 
     public bool ExistsNormalized(string normalizedRelativePath)

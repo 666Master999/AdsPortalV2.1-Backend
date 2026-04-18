@@ -5,6 +5,7 @@ public class AuditLog
     public int Id { get; set; }
     public int ActorUserId { get; set; }
     public int? TargetUserId { get; set; }
+    public long? OutboxMessageId { get; set; }
     public string Action { get; set; } = "";
     public string? TargetType { get; set; }
     public int? TargetId { get; set; }

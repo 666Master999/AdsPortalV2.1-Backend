@@ -28,7 +28,10 @@ public sealed record AdDetailsDto(
     AdCategoryDto? Category,
     AdOwnerDto? User,
     IReadOnlyCollection<AdImageDto> Images,
+    IReadOnlyCollection<AdAttributeValueDto> AttributeValues,
     bool IsFavorite);
+
+public sealed record AdAttributeFilterDto(IReadOnlyCollection<int> AttributeIds, IReadOnlyCollection<string> Values);
 
 public sealed record ModerationAdDto(
     int Id,
@@ -79,6 +82,14 @@ public sealed record NotificationDto(
     string? ActorName);
 
 public sealed record NotificationsResultDto(IReadOnlyCollection<NotificationDto> Items);
+
+// Notification intent event sent over realtime channel. Client decides presentation based on IsMuted flag.
+public sealed record MessageNotificationCandidateEvent(
+    int ConversationId,
+    int MessageId,
+    int SenderId,
+    DateTime CreatedAt,
+    bool IsMuted);
 
 public sealed record UserAdDto(
     int Id,
@@ -139,6 +150,10 @@ public sealed record ConversationUserPresenceDto(int Id, string? UserName, strin
 public sealed record ConversationMetaDto(int Id, int AdId, ConversationAdMetaDto Ad, ConversationUserPresenceDto Me, ConversationUserPresenceDto Opponent, DateTime CreatedAt, bool IsClosed, string? LastMessageText);
 
 public sealed record MessageAuthorDto(int Id, string? UserName, string UserLogin, string? AvatarPath);
+public sealed record ReplyPreviewDto(int Id, int AuthorId, string? AuthorName, string? TextSnippet);
+
+public sealed record ChatAttachmentDto(string Url, MessageType Type, string? FileName = null, string? MimeType = null, long? Size = null, string? ThumbnailUrl = null);
+
 public sealed record ConversationMessageDto(
     int ConversationId,
     int Id,
@@ -147,11 +162,13 @@ public sealed record ConversationMessageDto(
     MessageAuthorDto Author,
     DateTime CreatedAt,
     string? Text,
-    IReadOnlyCollection<ChatAttachment> Attachments,
+    IReadOnlyCollection<ChatAttachmentDto> Attachments,
     int? ReplyToMessageId,
+    ReplyPreviewDto? ReplyPreview,
     DateTime? EditedAt,
     DateTime? DeletedAt,
-    string? ClientTag);
+    string? ClientTag,
+    bool IsRead);
 
 public sealed record ConversationMessagesChunkDto(IReadOnlyCollection<ConversationMessageDto> Messages, bool HasMore);
 

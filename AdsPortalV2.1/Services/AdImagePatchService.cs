@@ -51,15 +51,15 @@ public class AdImagePatchService(
 
         var ctx = Parse(image);
 
-        try
-        {
-            if (ctx.Delete)
-                HandleDelete(ad, ctx, updated, errors);
-            else if (ctx.HasId)
-                HandleUpdate(ad, ctx, updated, skipped, errors);
-            else
-                HandleAdd(ad, ctx, updated, errors);
-        }
+            try
+            {
+                if (ctx.Delete)
+                    HandleDelete(ad, ctx, updated, errors);
+                else if (ctx.HasId)
+                    HandleUpdate(ad, ctx, updated, skipped, errors);
+                else
+                    HandleAdd(ad, ctx, updated, errors);
+            }
         catch (Exception ex)
         {
             logger.LogError(ex, "Image patch failed for ad {AdId}", ad.Id);
@@ -103,10 +103,7 @@ public class AdImagePatchService(
         }
 
         if (!string.IsNullOrWhiteSpace(image.FilePath))
-        {
-            if (fileStorage.Exists(image.FilePath))
-                fileStorage.Delete(image.FilePath);
-        }
+            ad.QueueImageDeletion([image.FilePath]);
 
         db.AdImages.Remove(image);
         updated.Add(AdFieldNames.Images);
@@ -122,6 +119,7 @@ public class AdImagePatchService(
             ad.MainImageId = next;
             updated.Add(AdFieldNames.MainImageId);
         }
+
     }
 
     private static void HandleUpdate(
@@ -162,12 +160,6 @@ public class AdImagePatchService(
         if (!fileStorage.TryNormalize(ctx.FilePath, out var relativePath))
         {
             errors.Add(new PatchIssueDto(PatchErrorCodes.InvalidValue, AdFieldNames.Images, "Invalid filePath."));
-            return;
-        }
-
-        if (!fileStorage.ExistsNormalized(relativePath))
-        {
-            errors.Add(new PatchIssueDto(PatchErrorCodes.NotFound, AdFieldNames.Images, "File not found."));
             return;
         }
 

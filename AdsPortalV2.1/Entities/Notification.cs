@@ -5,6 +5,7 @@ public class Notification
     public int Id { get; set; }
     public int UserId { get; set; }
     public int? AdId { get; set; }
+    public long? OutboxMessageId { get; set; }
     public NotificationType Type { get; set; }
     public string? Reason { get; set; }
     public string? PreviewJson { get; set; }

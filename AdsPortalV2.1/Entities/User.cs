@@ -3,7 +3,9 @@ using System.Text.Json.Serialization;
 
 namespace AdsPortalV2.Entities;
 
-public class User
+using AdsPortalV2.Services;
+
+public class User : Entity
 {
     public int Id { get; set; }
     [MaxLength(50)]
@@ -33,4 +35,15 @@ public class User
     public List<Conversation> ConversationsAsSeller { get; set; } = [];
     public List<Conversation> ConversationsAsBuyer { get; set; } = [];
     public List<UserFavoriteAd> Favorites { get; set; } = [];
+
+    // Domain event helpers
+    public void MarkBanned(int actorId)
+    {
+        Raise(new UserBanned(Id, actorId));
+    }
+
+    public void MarkRoleAssigned(string role, int actorId)
+    {
+        Raise(new RoleAssigned(Id, role, actorId));
+    }
 }

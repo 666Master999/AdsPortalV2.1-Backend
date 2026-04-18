@@ -103,6 +103,7 @@ public static class DialogHelpers
     public static ConversationMessageDto ToConversationMessageDto(int conversationId, ChatMessage msg, MessageAuthorDto? author = null)
     {
         var a = author ?? new MessageAuthorDto(msg.AuthorId, null, string.Empty, null);
+        var attachments = (msg.Attachments ?? []).Select(at => new ChatAttachmentDto(at.Url, at.Type, null, null, null, at.Url)).ToList();
         return new ConversationMessageDto(
             conversationId,
             msg.Id,
@@ -111,11 +112,13 @@ public static class DialogHelpers
             a,
             msg.CreatedAt,
             msg.Text,
-            (IReadOnlyCollection<ChatAttachment>)(msg.Attachments ?? []),
+            attachments,
             msg.ReplyToMessageId,
+            null,
             msg.EditedAt,
             msg.DeletedAt,
-            msg.ClientTag);
+            msg.ClientTag,
+            false);
     }
 
     public static async IAsyncEnumerable<ChatMessage> ReadMaterializedMessagesAsync(string folder, DialogMeta meta, int? minMessageId = null, bool useSnapshot = true)

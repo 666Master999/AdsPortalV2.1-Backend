@@ -4,7 +4,7 @@ namespace AdsPortalV2.Models;
 
 public static class PatchHelpers
 {
-    public const int MaxStringLength = 5000;
+    public const int MaxStringLength = 2000;
 
     public static void UpdateString(
         JsonElement raw,
